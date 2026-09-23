@@ -1,9 +1,14 @@
 import "server-only";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
+  getContact,
+  getEstimate,
   getSalesOrder,
+  listAllEstimates,
   listAllSalesOrders,
   zohoItemImageUrl,
+  type ZohoContact,
+  type ZohoEstimate,
   type ZohoLineItem,
   type ZohoSalesOrder,
 } from "./client";
@@ -18,6 +23,8 @@ export type SyncResult = {
 const text = (value: unknown) => (typeof value === "string" && value.trim() !== "" ? value : null);
 const num = (value: unknown) => (value === "" || value == null || Number.isNaN(Number(value)) ? null : Number(value));
 const timestamp = (value: string) => (value ? value.replace(/([+-]\d{2})(\d{2})$/, "$1:$2") : null);
+const hasAddress = (address?: Record<string, string> | null): address is Record<string, string> =>
+  !!address && Object.values(address).some((v) => typeof v === "string" && v.trim() !== "");
 
 function toSalesOrderRow(so: ZohoSalesOrder) {
   // Line items are stored in their own table.
@@ -162,6 +169,201 @@ export async function syncSalesOrders({ triggeredBy }: { triggeredBy?: string } 
     const removedIds = existing.filter((row) => !zohoIds.has(row.zoho_salesorder_id)).map((row) => row.id);
     if (removedIds.length) {
       const { error: deleteError } = await db.from("sales_orders").delete().in("id", removedIds);
+      if (deleteError) throw deleteError;
+      result.deleted = removedIds.length;
+    }
+
+    await db
+      .from("zoho_sync_runs")
+      .update({
+        status: "success",
+        orders_fetched: result.fetched,
+        orders_updated: result.updated,
+        orders_deleted: result.deleted,
+        finished_at: new Date().toISOString(),
+      })
+      .eq("id", run.id);
+
+    return result;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await db
+      .from("zoho_sync_runs")
+      .update({
+        status: "failed",
+        orders_fetched: result.fetched,
+        orders_updated: result.updated,
+        orders_deleted: result.deleted,
+        error: message,
+        finished_at: new Date().toISOString(),
+      })
+      .eq("id", run.id);
+    throw new Error(message);
+  }
+}
+
+// Quotes (Zoho Books "estimates") ---------------------------------------------
+
+function toQuoteRow(est: ZohoEstimate) {
+  // Line items are stored in their own table.
+  const raw: Partial<ZohoEstimate> = { ...est };
+  delete raw.line_items;
+  return {
+    zoho_estimate_id: est.estimate_id,
+    estimate_number: est.estimate_number,
+    reference_number: text(est.reference_number),
+    date: text(est.date),
+    expiry_date: text(est.expiry_date),
+    status: text(est.status),
+    current_sub_status: text(est.current_sub_status),
+    customer_id: text(est.customer_id),
+    customer_name: text(est.customer_name),
+    salesperson_name: text(est.salesperson_name),
+    currency_code: text(est.currency_code),
+    currency_symbol: text(est.currency_symbol),
+    exchange_rate: num(est.exchange_rate),
+    sub_total: num(est.sub_total),
+    discount_total: num(est.discount_total),
+    tax_total: num(est.tax_total),
+    shipping_charge: num(est.shipping_charge),
+    adjustment: num(est.adjustment),
+    total: num(est.total),
+    total_quantity: num(est.total_quantity),
+    place_of_supply: text(est.place_of_supply),
+    payment_terms_label: text(est.payment_terms_label),
+    billing_address: est.billing_address ?? null,
+    shipping_address: est.shipping_address ?? null,
+    notes: text(est.notes),
+    terms: text(est.terms),
+    custom_fields: est.custom_fields ?? [],
+    zoho_created_time: timestamp(est.created_time),
+    zoho_last_modified_time: timestamp(est.last_modified_time),
+    raw,
+    synced_at: new Date().toISOString(),
+  };
+}
+
+function toQuoteItemRow(quoteId: string, li: ZohoLineItem) {
+  const hasImage = Boolean(li.item_id && li.image_document_id);
+  return {
+    quote_id: quoteId,
+    zoho_line_item_id: li.line_item_id,
+    zoho_item_id: text(li.item_id),
+    item_order: num(li.item_order),
+    name: li.name,
+    sku: text(li.sku),
+    description: text(li.description),
+    unit: text(li.unit),
+    hsn_or_sac: text(li.hsn_or_sac),
+    product_type: text(li.product_type),
+    quantity: num(li.quantity),
+    rate: num(li.rate),
+    discount: num(li.discount),
+    discount_amount: num(li.discount_amount),
+    tax_id: text(li.tax_id),
+    tax_name: text(li.tax_name),
+    tax_percentage: num(li.tax_percentage),
+    item_sub_total: num(li.item_sub_total),
+    item_total: num(li.item_total),
+    image_document_id: text(li.image_document_id),
+    image_name: text(li.image_name),
+    image_type: text(li.image_type),
+    image_url: hasImage ? zohoItemImageUrl(li.item_id) : null,
+    raw: li,
+  };
+}
+
+/**
+ * Pulls quotes (estimates) from Zoho Books into quotes / quote_items.
+ * Read-only: only fetches from Zoho and never writes back. Only estimates whose
+ * last_modified_time changed are re-fetched in detail; estimates deleted in Zoho
+ * are removed locally.
+ */
+export async function syncQuotes({ triggeredBy }: { triggeredBy?: string } = {}): Promise<SyncResult> {
+  const db = createAdminClient();
+
+  const { data: run, error: runError } = await db
+    .from("zoho_sync_runs")
+    .insert({ resource: "quotes", triggered_by: triggeredBy ?? null })
+    .select("id")
+    .single();
+  if (runError) throw new Error(`Could not start sync: ${runError.message}`);
+
+  const result: SyncResult = { fetched: 0, updated: 0, deleted: 0 };
+
+  try {
+    const summaries = await listAllEstimates();
+    result.fetched = summaries.length;
+
+    const { data: existing, error: existingError } = await db
+      .from("quotes")
+      .select("id, zoho_estimate_id, zoho_last_modified_time");
+    if (existingError) throw existingError;
+
+    const known = new Map(existing.map((row) => [row.zoho_estimate_id, row]));
+
+    // Customer addresses are looked up once per contact and reused across quotes.
+    const contactCache = new Map<string, ZohoContact | null>();
+
+    // 1. Upsert new / changed quotes with their line items.
+    for (const summary of summaries) {
+      const local = known.get(summary.estimate_id);
+      const zohoModified = new Date(timestamp(summary.last_modified_time) ?? 0).getTime();
+      const localModified = local?.zoho_last_modified_time ? new Date(local.zoho_last_modified_time).getTime() : -1;
+      if (local && zohoModified === localModified) continue;
+
+      const est = await getEstimate(summary.estimate_id);
+      const row = toQuoteRow(est);
+
+      // Pull the customer's billing / shipping address from their contact record,
+      // falling back to whatever the estimate itself carries.
+      if (est.customer_id) {
+        let contact = contactCache.get(est.customer_id);
+        if (contact === undefined) {
+          try {
+            contact = await getContact(est.customer_id);
+          } catch {
+            contact = null;
+          }
+          contactCache.set(est.customer_id, contact);
+        }
+        if (contact) {
+          if (hasAddress(contact.billing_address)) row.billing_address = contact.billing_address;
+          if (hasAddress(contact.shipping_address)) row.shipping_address = contact.shipping_address;
+        }
+      }
+
+      const { data: saved, error: quoteError } = await db
+        .from("quotes")
+        .upsert(row, { onConflict: "zoho_estimate_id" })
+        .select("id")
+        .single();
+      if (quoteError) throw new Error(`${est.estimate_number}: ${quoteError.message}`);
+
+      const items = (est.line_items ?? []).map((li) => toQuoteItemRow(saved.id, li));
+      if (items.length) {
+        const { error: itemsError } = await db
+          .from("quote_items")
+          .upsert(items, { onConflict: "zoho_line_item_id" });
+        if (itemsError) throw new Error(`${est.estimate_number} items: ${itemsError.message}`);
+      }
+
+      // Remove line items that were deleted from the quote in Zoho.
+      let staleItems = db.from("quote_items").delete().eq("quote_id", saved.id);
+      if (items.length) {
+        staleItems = staleItems.not("zoho_line_item_id", "in", `(${items.map((i) => i.zoho_line_item_id).join(",")})`);
+      }
+      const { error: staleError } = await staleItems;
+      if (staleError) throw new Error(`${est.estimate_number} cleanup: ${staleError.message}`);
+
+      result.updated++;
+    }
+
+    // 2. Remove quotes that no longer exist in Zoho (items cascade).
+    const zohoIds = new Set(summaries.map((s) => s.estimate_id));
+    const removedIds = existing.filter((row) => !zohoIds.has(row.zoho_estimate_id)).map((row) => row.id);
+    if (removedIds.length) {
+      const { error: deleteError } = await db.from("quotes").delete().in("id", removedIds);
       if (deleteError) throw deleteError;
       result.deleted = removedIds.length;
     }
