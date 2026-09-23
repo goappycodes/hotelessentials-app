@@ -3,12 +3,13 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
-import { LayoutDashboard, Menu, ShoppingCart, X } from "lucide-react";
+import { FileText, LayoutDashboard, Menu, ShoppingCart, X } from "lucide-react";
 import { Logo } from "@/components/logo";
 
 const nav = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/dashboard/sales-orders", label: "Sales Orders", icon: ShoppingCart },
+  { href: "/dashboard/quotes", label: "Quotes", icon: FileText },
 ];
 
 export function Sidebar() {

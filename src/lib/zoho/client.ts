@@ -164,6 +164,48 @@ export type ZohoSalesOrder = {
   [key: string]: unknown;
 };
 
+// Quotes (Zoho Books "estimates") -----------------------------------------------------
+
+export type ZohoEstimateSummary = {
+  estimate_id: string;
+  estimate_number: string;
+  last_modified_time: string;
+};
+
+export type ZohoEstimate = {
+  estimate_id: string;
+  estimate_number: string;
+  reference_number: string;
+  date: string;
+  expiry_date: string;
+  status: string;
+  current_sub_status: string;
+  customer_id: string;
+  customer_name: string;
+  salesperson_name: string;
+  currency_code: string;
+  currency_symbol: string;
+  exchange_rate: number;
+  sub_total: number;
+  discount_total: number;
+  tax_total: number;
+  shipping_charge: number;
+  adjustment: number;
+  total: number;
+  total_quantity: number;
+  place_of_supply: string;
+  payment_terms_label: string;
+  billing_address: Record<string, string>;
+  shipping_address: Record<string, string>;
+  notes: string;
+  terms: string;
+  custom_fields: unknown[];
+  created_time: string;
+  last_modified_time: string;
+  line_items: ZohoLineItem[];
+  [key: string]: unknown;
+};
+
 // Endpoints ---------------------------------------------------------------------------
 
 export async function listAllSalesOrders() {
@@ -183,6 +225,39 @@ export async function listAllSalesOrders() {
 export async function getSalesOrder(salesorderId: string) {
   const data = await zohoJson<{ salesorder: ZohoSalesOrder }>(`/salesorders/${salesorderId}`);
   return data.salesorder;
+}
+
+export async function listAllEstimates() {
+  const estimates: ZohoEstimateSummary[] = [];
+
+  for (let page = 1; ; page++) {
+    const data = await zohoJson<{
+      estimates: ZohoEstimateSummary[];
+      page_context: { has_more_page: boolean };
+    }>("/estimates", { page, per_page: 200 });
+
+    estimates.push(...data.estimates);
+    if (!data.page_context?.has_more_page) return estimates;
+  }
+}
+
+export async function getEstimate(estimateId: string) {
+  const data = await zohoJson<{ estimate: ZohoEstimate }>(`/estimates/${estimateId}`);
+  return data.estimate;
+}
+
+// Contacts (customers) ----------------------------------------------------------
+
+export type ZohoContact = {
+  contact_id: string;
+  billing_address?: Record<string, string>;
+  shipping_address?: Record<string, string>;
+  [key: string]: unknown;
+};
+
+export async function getContact(contactId: string) {
+  const data = await zohoJson<{ contact: ZohoContact }>(`/contacts/${contactId}`);
+  return data.contact;
 }
 
 /** Zoho Books image link for an item (requires a Zoho OAuth token to open). */

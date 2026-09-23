@@ -25,6 +25,10 @@ export const humanize = (value: string | null) =>
 const statusTones: Record<string, string> = {
   draft: "bg-slate-100 text-slate-600 ring-slate-500/15",
   open: "bg-sky-50 text-sky-700 ring-sky-600/15",
+  sent: "bg-sky-50 text-sky-700 ring-sky-600/15",
+  accepted: "bg-emerald-50 text-emerald-700 ring-emerald-600/15",
+  declined: "bg-red-50 text-red-600 ring-red-600/15",
+  expired: "bg-amber-50 text-amber-700 ring-amber-600/15",
   pending_approval: "bg-amber-50 text-amber-700 ring-amber-600/15",
   approved: "bg-sky-50 text-sky-700 ring-sky-600/15",
   partially_invoiced: "bg-violet-50 text-violet-700 ring-violet-600/15",
