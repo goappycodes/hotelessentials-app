@@ -4,6 +4,7 @@ import { AlertTriangle, ChevronLeft, ChevronRight, ClipboardList, Search } from 
 import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { DispatchStatusBadge } from "./_dispatch/dispatch-status";
+import { ExportRemainingButton } from "./export-remaining-button";
 import { formatDate, formatDateTime, formatMoney, humanize, StatusBadge } from "./format";
 import { SyncButton } from "./sync-button";
 
@@ -109,7 +110,10 @@ export default async function SalesOrdersPage({ searchParams }: PageProps<"/dash
             )}
           </p>
         </div>
-        {role === "admin" && <SyncButton />}
+        <div className="flex flex-col items-start gap-2 sm:flex-row">
+          <ExportRemainingButton />
+          {role === "admin" && <SyncButton />}
+        </div>
       </div>
 
       {error && (

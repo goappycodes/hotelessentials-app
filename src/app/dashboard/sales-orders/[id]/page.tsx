@@ -162,7 +162,7 @@ export default async function SalesOrderPage({ params }: PageProps<"/dashboard/s
               title="Download the items table as an Excel file"
               className="flex h-10 items-center gap-2 rounded-xl border border-slate-200 px-4 text-sm font-medium text-slate-600 transition hover:border-brand-300 hover:bg-brand-50 hover:text-brand-700"
             >
-              <FileSpreadsheet className="size-4" /> Export Excel
+              <FileSpreadsheet className="size-4" /> Export remaining items
             </a>
             <Link
               href={`/dashboard/sales-orders/${order.id}/dispatch`}

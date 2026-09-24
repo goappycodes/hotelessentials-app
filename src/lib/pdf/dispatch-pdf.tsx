@@ -29,7 +29,7 @@ export type DispatchPdfData = {
 const qtyFormat = new Intl.NumberFormat("en-IN", { maximumFractionDigits: 3 });
 
 // Column widths (must sum to 100).
-const COLS = { sno: 6, box: 12, image: 14, name: 32, sent: 18, remaining: 18 };
+const COLS = { sno: 6, image: 14, name: 32, box: 12, sent: 18, remaining: 18 };
 
 function DispatchDocument({ data }: { data: DispatchPdfData }) {
   return (
@@ -52,16 +52,16 @@ function DispatchDocument({ data }: { data: DispatchPdfData }) {
         />
 
         {/* Title */}
-        <Text style={s.title}>Dispatch</Text>
+        <Text style={s.title}>Dispatch Orders</Text>
 
         {/* Items table */}
         <View style={s.table}>
           {/* Header (repeats on each page) */}
           <View style={s.row} fixed>
             <Text style={[s.headerCell, { width: `${COLS.sno}%` }]}>S.No.</Text>
-            <Text style={[s.headerCell, { width: `${COLS.box}%` }]}>Box Name</Text>
             <Text style={[s.headerCell, { width: `${COLS.image}%` }]}>Image</Text>
             <Text style={[s.headerCell, { width: `${COLS.name}%` }]}>Item Name</Text>
+            <Text style={[s.headerCell, { width: `${COLS.box}%` }]}>Box Name</Text>
             <Text style={[s.headerCell, { width: `${COLS.sent}%` }]}>Quantity Sent</Text>
             <Text style={[s.headerCell, { width: `${COLS.remaining}%` }]}>Quantity Remaining</Text>
           </View>
@@ -72,14 +72,14 @@ function DispatchDocument({ data }: { data: DispatchPdfData }) {
               <View style={[s.cell, { width: `${COLS.sno}%`, alignItems: "center" }]}>
                 <Text>{index + 1}</Text>
               </View>
-              <View style={[s.cell, { width: `${COLS.box}%`, alignItems: "center" }]}>
-                <Text>{item.box}</Text>
-              </View>
               <View style={[s.cell, { width: `${COLS.image}%`, alignItems: "center" }]}>
                 {item.image ? <Image style={s.itemImage} src={item.image} /> : <Text> </Text>}
               </View>
               <View style={[s.cell, { width: `${COLS.name}%` }]}>
                 <Text>{item.name}</Text>
+              </View>
+              <View style={[s.cell, { width: `${COLS.box}%`, alignItems: "center" }]}>
+                <Text>{item.box}</Text>
               </View>
               <View style={[s.cell, { width: `${COLS.sent}%`, alignItems: "center" }]}>
                 <Text>{qtyFormat.format(item.quantity_sent)}</Text>

@@ -1,6 +1,6 @@
 import type { NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { buildSalesOrderItemsXlsx } from "@/lib/excel/sales-order-items";
+import { buildSalesOrderItemsXlsx, toExportRow } from "@/lib/excel/sales-order-items";
 import { sanitizeFilename } from "@/lib/pdf/route-helpers";
 
 export const runtime = "nodejs";
@@ -39,22 +39,8 @@ export async function GET(_request: NextRequest, ctx: RouteContext<"/dashboard/s
 
   if (!order) return new Response("Not found", { status: 404 });
 
-  // The view reports remaining as sent − ordered (< 0 = still to send), so the quantity still
-  // to send is its negation; over-sent items show 0. Same figure as the dispatch PDF.
   const dispatchByItem = new Map((dispatch ?? []).map((d) => [d.sales_order_item_id, d]));
-
-  const rows = order.sales_order_items.map((item, index) => {
-    const quantity = Number(item.quantity ?? 0);
-    const d = dispatchByItem.get(item.id);
-    return {
-      serial: item.item_order ?? index + 1,
-      item: item.name,
-      hsn_or_sac: item.hsn_or_sac,
-      quantity,
-      sent: d ? Number(d.quantity_sent) : 0,
-      remaining: d ? Math.max(0, -Number(d.remaining)) : quantity,
-    };
-  });
+  const rows = order.sales_order_items.map((item, index) => toExportRow(item, index, dispatchByItem.get(item.id)));
 
   const xlsx = await buildSalesOrderItemsXlsx(rows);
   const filename = sanitizeFilename(`${order.salesorder_number} items`) || "sales-order-items";
