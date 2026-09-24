@@ -1,16 +1,20 @@
 import type { NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { renderDispatchPdf, type DispatchPdfItem } from "@/lib/pdf/dispatch-pdf";
-import { pickField, sanitizeFilename } from "@/lib/pdf/route-helpers";
+import type { PdfImage } from "@/lib/pdf/shared";
+import { fetchItemImage, pickField, sanitizeFilename } from "@/lib/pdf/route-helpers";
 
+// Generating the PDF fetches each item's image from Zoho (rate-limited), so allow time.
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 120;
 
 type BatchItemRow = {
+  box_label: string;
   quantity_sent: number;
   item_name: string;
   sales_order_item_id: string | null;
-  sales_order_items: { item_order: number | null } | null;
+  sales_order_items: { item_order: number | null; zoho_item_id: string | null; image_document_id: string | null } | null;
 };
 
 type OrderRow = {
@@ -40,7 +44,9 @@ export async function GET(_request: NextRequest, ctx: RouteContext<"/dashboard/s
     supabase.from("sales_orders").select("billing_address, custom_fields, raw").eq("id", id).maybeSingle<OrderRow>(),
     supabase
       .from("sales_order_batch_items")
-      .select("quantity_sent, item_name, sales_order_item_id, sales_order_items(item_order)")
+      .select(
+        "box_label, quantity_sent, item_name, sales_order_item_id, sales_order_items(item_order, zoho_item_id, image_document_id)",
+      )
       .eq("batch_id", batchId)
       .returns<BatchItemRow[]>(),
   ]);
@@ -56,15 +62,35 @@ export async function GET(_request: NextRequest, ctx: RouteContext<"/dashboard/s
     : { data: [] };
   const remainingByItem = new Map((totals ?? []).map((t) => [t.sales_order_item_id, Math.max(0, -Number(t.remaining))]));
 
-  // Same ordering as the batch page: by the order's line-item sequence; items removed in Zoho go last.
+  // Same grouping as the batch page: by box (natural sort, so "Box 2" comes before "Box 10"),
+  // then by the order's line-item sequence; items removed in Zoho go last within their box.
+  const collator = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
   const sorted = [...(items ?? [])].sort(
-    (a, b) => (a.sales_order_items?.item_order ?? Infinity) - (b.sales_order_items?.item_order ?? Infinity),
+    (a, b) =>
+      collator.compare(a.box_label, b.box_label) ||
+      (a.sales_order_items?.item_order ?? Infinity) - (b.sales_order_items?.item_order ?? Infinity),
   );
-  const pdfItems: DispatchPdfItem[] = sorted.map((i) => ({
-    name: i.item_name,
-    quantity_sent: Number(i.quantity_sent),
-    quantity_remaining: i.sales_order_item_id ? (remainingByItem.get(i.sales_order_item_id) ?? null) : null,
-  }));
+
+  // Item pictures come from Zoho (one request per distinct item; the same item is never fetched twice).
+  const images = new Map<string, PdfImage | null>();
+  const pdfItems: DispatchPdfItem[] = [];
+  for (const i of sorted) {
+    const zohoItemId = i.sales_order_items?.zoho_item_id ?? null;
+    let image: PdfImage | null = null;
+    if (zohoItemId) {
+      if (!images.has(zohoItemId)) {
+        images.set(zohoItemId, await fetchItemImage(zohoItemId, i.sales_order_items?.image_document_id ?? null));
+      }
+      image = images.get(zohoItemId) ?? null;
+    }
+    pdfItems.push({
+      box: i.box_label,
+      name: i.item_name,
+      image,
+      quantity_sent: Number(i.quantity_sent),
+      quantity_remaining: i.sales_order_item_id ? (remainingByItem.get(i.sales_order_item_id) ?? null) : null,
+    });
+  }
 
   const billing = order.billing_address ?? {};
 

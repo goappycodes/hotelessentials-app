@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft, Download, PackagePlus, Truck } from "lucide-react";
+import { ArrowLeft, Download, FileSpreadsheet, PackagePlus, Truck } from "lucide-react";
 import { ItemImage } from "@/components/item-image";
 import { createClient } from "@/lib/supabase/server";
 import { DispatchStatusBadge, formatQty, RemainingBadge } from "@/app/dashboard/sales-orders/_dispatch/dispatch-status";
@@ -156,12 +156,21 @@ export default async function SalesOrderPage({ params }: PageProps<"/dashboard/s
               {order.sales_order_items.length} line items · {order.total_quantity ?? 0} units
             </p>
           </div>
-          <Link
-            href={`/dashboard/sales-orders/${order.id}/dispatch`}
-            className="flex h-10 items-center gap-2 self-start rounded-xl bg-slate-900 px-4 text-sm font-medium text-white shadow-lg shadow-slate-900/10 transition hover:bg-slate-800 sm:self-auto"
-          >
-            <Truck className="size-4" /> Dispatch items
-          </Link>
+          <div className="flex flex-wrap items-center gap-2">
+            <a
+              href={`/dashboard/sales-orders/${order.id}/export`}
+              title="Download the items table as an Excel file"
+              className="flex h-10 items-center gap-2 rounded-xl border border-slate-200 px-4 text-sm font-medium text-slate-600 transition hover:border-brand-300 hover:bg-brand-50 hover:text-brand-700"
+            >
+              <FileSpreadsheet className="size-4" /> Export Excel
+            </a>
+            <Link
+              href={`/dashboard/sales-orders/${order.id}/dispatch`}
+              className="flex h-10 items-center gap-2 rounded-xl bg-slate-900 px-4 text-sm font-medium text-white shadow-lg shadow-slate-900/10 transition hover:bg-slate-800"
+            >
+              <Truck className="size-4" /> Dispatch items
+            </Link>
+          </div>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[1080px] text-left text-sm">

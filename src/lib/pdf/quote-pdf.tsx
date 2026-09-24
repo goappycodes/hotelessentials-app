@@ -62,7 +62,6 @@ const COLS = { sno: 6, image: 14, code: 12, name: 32, qty: 8, rate: 11, taxable:
 const s = {
   ...baseStyles,
   ...StyleSheet.create({
-    itemImage: { width: 56, height: 56, objectFit: "contain", alignSelf: "center" },
     itemName: {},
     itemDesc: { fontSize: 6.5, color: MUTED, marginTop: 2 },
     // Totals

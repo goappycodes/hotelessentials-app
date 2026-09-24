@@ -1,8 +1,7 @@
 import type { NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { getItemImage } from "@/lib/zoho/client";
 import { renderQuotePdf, type QuotePdfItem } from "@/lib/pdf/quote-pdf";
-import { pickField, sanitizeFilename } from "@/lib/pdf/route-helpers";
+import { fetchItemImage, pickField, sanitizeFilename } from "@/lib/pdf/route-helpers";
 
 // Generating the PDF fetches each item's image from Zoho (rate-limited), so allow time.
 export const runtime = "nodejs";
@@ -36,11 +35,6 @@ type QuoteRow = {
   quote_items: QuoteItemRow[];
 };
 
-function imageFormat(contentType: string): "png" | "jpg" | null {
-  if (contentType === "image/png") return "png";
-  if (contentType === "image/jpeg" || contentType === "image/jpg") return "jpg";
-  return null;
-}
 
 export async function GET(_request: NextRequest, ctx: RouteContext<"/dashboard/quotes/[id]/pdf">) {
   const supabase = await createClient();
@@ -64,19 +58,10 @@ export async function GET(_request: NextRequest, ctx: RouteContext<"/dashboard/q
 
   if (!quote) return new Response("Not found", { status: 404 });
 
-  // Fetch item images from Zoho (read-only). Skip items without an image.
+  // Fetch item images from Zoho (read-only). Items without an image are skipped.
   const items: QuotePdfItem[] = [];
   for (const row of quote.quote_items) {
-    let image: QuotePdfItem["image"] = null;
-    if (row.zoho_item_id && row.image_document_id && /^\d+$/.test(row.zoho_item_id)) {
-      try {
-        const fetched = await getItemImage(row.zoho_item_id);
-        const format = fetched && imageFormat(fetched.contentType);
-        if (fetched && format) image = { data: Buffer.from(fetched.body), format };
-      } catch {
-        // Ignore image failures — the quote still renders without the picture.
-      }
-    }
+    const image = await fetchItemImage(row.zoho_item_id, row.image_document_id);
     items.push({
       item_order: row.item_order,
       name: row.name,

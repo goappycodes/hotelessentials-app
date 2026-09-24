@@ -70,6 +70,9 @@ export const COMPANY = {
   ],
 };
 
+/** An item picture ready to embed in a PDF. */
+export type PdfImage = { data: Buffer; format: "png" | "jpg" };
+
 // Formatting helpers -----------------------------------------------------------
 export function formatDate(value: string | null) {
   if (!value) return "—";
@@ -134,6 +137,7 @@ export const baseStyles = StyleSheet.create({
     borderColor: BORDER,
     justifyContent: "center",
   },
+  itemImage: { width: 56, height: 56, objectFit: "contain", alignSelf: "center" },
 });
 
 const s = baseStyles;
