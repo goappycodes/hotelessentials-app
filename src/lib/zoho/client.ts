@@ -52,6 +52,7 @@ async function throttle() {
   lastRequestAt = Date.now();
 }
 
+/** The only way the app talks to Zoho Books. It is read-only: every request is a GET, so Books data is never changed. */
 async function zohoRequest(path: string, query: Record<string, string | number> = {}) {
   const url = new URL(`${env("ZOHO_API_BASE_URL")}/books/v3${path}`);
   url.searchParams.set("organization_id", env("ZOHO_BOOKS_ORG_ID"));
@@ -62,6 +63,7 @@ async function zohoRequest(path: string, query: Record<string, string | number> 
   for (let attempt = 0; ; attempt++) {
     await throttle();
     const res = await fetch(url, {
+      method: "GET",
       headers: { Authorization: `Zoho-oauthtoken ${await getAccessToken()}` },
       cache: "no-store",
     });

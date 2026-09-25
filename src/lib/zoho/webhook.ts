@@ -1,71 +1,26 @@
 import "server-only";
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import type { NextRequest } from "next/server";
 
-// Helpers for Zoho Books webhooks (Settings → Automation → Workflow Actions → Webhooks).
+// Helpers for the Zoho Books webhooks (Settings → Automation → Workflow Actions → Webhooks).
 
 const ZOHO_ID = /^\d{5,25}$/;
 
-type Pairs = Record<string, string>;
+/** The header the Zoho webhook sends its shared secret in (added under the webhook's HTTP Headers). */
+const SECRET_HEADER = "x-zoho-webhook-secret";
 
-/** Zoho's signed string: the key/value pairs sorted by key and joined as key+value, with no separators. */
-const concatSorted = (pairs: Pairs) =>
-  Object.keys(pairs)
-    .sort()
-    .map((key) => key + pairs[key])
-    .join("");
-
-function safeEqual(a: string, b: string) {
-  const x = Buffer.from(a);
-  const y = Buffer.from(b);
-  return x.length === y.length && timingSafeEqual(x, y);
-}
-
-/** The body's own key/value pairs: form fields, or the top-level scalar values of a JSON object. */
-function bodyPairs(rawBody: string, contentType: string): Pairs | null {
-  if (contentType.includes("application/x-www-form-urlencoded")) {
-    return Object.fromEntries(new URLSearchParams(rawBody));
-  }
-  try {
-    const parsed: unknown = JSON.parse(rawBody);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-    const scalars = Object.entries(parsed).filter(([, v]) => ["string", "number", "boolean"].includes(typeof v));
-    return Object.fromEntries(scalars.map(([k, v]) => [k, String(v)]));
-  } catch {
-    return null;
-  }
+/** Constant-time comparison. Both values are hashed first so their lengths can't leak through timing. */
+function secretsMatch(given: string, expected: string) {
+  const digest = (value: string) => createHash("sha256").update(value).digest();
+  return timingSafeEqual(digest(given), digest(expected));
 }
 
 /**
- * Verifies the X-Zoho-Webhook-Signature header: base64(HMAC-SHA256(secret, signed string)).
- * Zoho's docs describe the signed string as the query-string parameters sorted by key and joined as
- * key+value, followed by the raw JSON body for JSON payloads. For form-encoded (and flat JSON)
- * payloads the body's own key/value pairs are sorted in with the query parameters instead — Zoho's
- * sample code does that — so both constructions are accepted; either one requires the secret.
- */
-export function verifyZohoSignature(args: {
-  secret: string;
-  signature: string;
-  rawBody: string;
-  contentType: string;
-  query: URLSearchParams;
-}) {
-  const query: Pairs = Object.fromEntries(args.query);
-  const candidates = [concatSorted(query) + args.rawBody];
-
-  const body = bodyPairs(args.rawBody, args.contentType);
-  if (body) candidates.push(concatSorted({ ...query, ...body }));
-
-  const given = args.signature.trim();
-  return candidates.some((signed) => safeEqual(createHmac("sha256", args.secret).update(signed).digest("base64"), given));
-}
-
-/**
- * Finds a record id (`idKey`, e.g. "estimate_id" or "salesorder_id") in a webhook body. Zoho's docs don't
- * show a sample body for the "Default payload", so this looks for the key anywhere in the JSON (top level,
- * under an `estimate` / `salesorder` key, inside a `JSONString` field, …) or in form fields. Only string
- * ids are trusted from the parsed JSON: Zoho ids are 19 digits, which a JSON number cannot hold exactly.
+ * Finds a Zoho id (`idKey`, e.g. "quote_id" or "organization_id") in a webhook body. It looks for the key at
+ * the top level of the JSON — or nested under another key, inside a `JSONString` field, or as a form field —
+ * so it does not depend on the exact body layout. Only string ids are trusted from the parsed JSON: Zoho ids
+ * are 11–19 digits, which a JSON number cannot always hold exactly.
  */
 export function extractZohoId(rawBody: string, contentType: string, idKey: string): string | null {
   let root: unknown;
@@ -106,10 +61,11 @@ export function extractZohoId(rawBody: string, contentType: string, idKey: strin
 }
 
 /**
- * The request handling shared by every Zoho webhook route: refuse unless the secret is configured and the
- * signature is valid, find the record id, run `sync`, and reply with JSON. It authenticates the request
- * itself because Zoho is not signed in to the app. Zoho waits 10 s and retries anything that isn't a 2xx,
- * so failures are returned as 4xx/5xx rather than swallowed.
+ * The request handling shared by every Zoho webhook route. Zoho is not signed in to the app, so the request
+ * is authenticated here: the `X-Zoho-Webhook-Secret` header must equal ZOHO_WEBHOOK_SECRET, and the payload's
+ * `organization_id` must be this app's Zoho organization (ZOHO_BOOKS_ORG_ID). Then it reads the record id
+ * (`idKey`), runs `sync` and replies with JSON. Zoho waits 10 s and retries anything that isn't a 2xx, so
+ * failures are returned as 4xx/5xx rather than swallowed.
  */
 export async function handleZohoWebhook(
   request: NextRequest,
@@ -117,23 +73,30 @@ export async function handleZohoWebhook(
 ): Promise<Response> {
   const reply = (body: Record<string, unknown>, status = 200) => Response.json(body, { status });
 
+  // Refuse everything until both values are configured, rather than running unauthenticated.
   const secret = process.env.ZOHO_WEBHOOK_SECRET;
-  if (!secret) {
-    console.error("[zoho-webhook] ZOHO_WEBHOOK_SECRET is not set; rejecting the request.");
+  const organizationId = process.env.ZOHO_BOOKS_ORG_ID;
+  if (!secret || !organizationId) {
+    console.error("[zoho-webhook] ZOHO_WEBHOOK_SECRET / ZOHO_BOOKS_ORG_ID is not set; rejecting the request.");
     return reply({ ok: false, error: "The webhook is not configured on the server." }, 500);
   }
 
-  // The signature covers the exact bytes Zoho sent, so read the body as raw text before parsing anything.
+  const given = request.headers.get(SECRET_HEADER);
+  if (!given || !secretsMatch(given, secret)) {
+    return reply({ ok: false, error: "Invalid or missing X-Zoho-Webhook-Secret header." }, 401);
+  }
+
   const rawBody = await request.text();
   const contentType = request.headers.get("content-type") ?? "";
-  const signature = request.headers.get("x-zoho-webhook-signature");
-
-  if (!signature || !verifyZohoSignature({ secret, signature, rawBody, contentType, query: request.nextUrl.searchParams })) {
-    return reply({ ok: false, error: "Invalid or missing signature." }, 401);
-  }
 
   const id = extractZohoId(rawBody, contentType, opts.idKey);
   if (!id) return reply({ ok: false, error: `No ${opts.idKey} found in the payload.` }, 400);
+
+  const payloadOrganizationId = extractZohoId(rawBody, contentType, "organization_id");
+  if (!payloadOrganizationId) return reply({ ok: false, error: "No organization_id found in the payload." }, 400);
+  if (payloadOrganizationId !== organizationId) {
+    return reply({ ok: false, error: "The payload's organization_id does not match this app's Zoho organization." }, 400);
+  }
 
   try {
     const result = await opts.sync(id);
@@ -148,5 +111,6 @@ export async function handleZohoWebhook(
 
 /** Response for GET: open the webhook URL in a browser to check it is deployed and the secret is set. */
 export function zohoWebhookHealth(name: string) {
-  return Response.json({ ok: true, webhook: name, method: "POST", configured: Boolean(process.env.ZOHO_WEBHOOK_SECRET) });
+  const configured = Boolean(process.env.ZOHO_WEBHOOK_SECRET && process.env.ZOHO_BOOKS_ORG_ID);
+  return Response.json({ ok: true, webhook: name, method: "POST", configured });
 }
