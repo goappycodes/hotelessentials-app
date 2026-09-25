@@ -45,6 +45,39 @@ Sales orders and their line items are imported from Zoho Books into `sales_order
 - **Images stay in Zoho.** `image_url` stores the Zoho image link, which needs an OAuth token, so the UI loads
   images through `/api/zoho/items/[itemId]/image` (signed-in users only, browser-cached for a day).
 
+## Zoho webhooks (Zoho → app, automatic)
+Zoho Books can push changes to the app so the local copies stay current without clicking **Sync from Zoho**:
+
+| Zoho module | Endpoint | Updates | Id read from the body |
+| --- | --- | --- | --- |
+| Estimates | `POST /api/zoho/webhooks/quotes` | `quotes` / `quote_items` | `estimate_id` |
+| Sales Orders | `POST /api/zoho/webhooks/sales-orders` | `sales_orders` / `sales_order_items` | `salesorder_id` |
+
+- The webhook body is only used to find the record id. The app then re-fetches that record from the Zoho API and saves it
+  with the same code as the Sync button (`saveQuote` / `saveSalesOrder` in `lib/zoho/sync.ts`): **creates** the record if it
+  is new, **updates** it (and its line items) if it exists. Redelivery is harmless (idempotent). Sales order line items keep
+  their local ids on update, so dispatch batches stay linked.
+- Requests are authenticated with Zoho's `X-Zoho-Webhook-Signature` (HMAC-SHA256 with the webhook's secret token, base64).
+  Without `ZOHO_WEBHOOK_SECRET` set, every request is refused. Each event is logged in `zoho_sync_runs`
+  (resource `quotes` / `sales_orders`).
+- Open an endpoint in a browser to check it is deployed: it returns `{"ok":true,"configured":true,…}`.
+- Not handled: records **deleted** in Zoho (the Sync buttons remove them).
+
+**Set up** (once, then repeat steps 2–3 for the second module)
+1. Pick a secret of 12–50 letters/digits and set it as `ZOHO_WEBHOOK_SECRET` (Vercel → Environment Variables, and `.env.local`
+   for local runs). Redeploy so the server picks it up. Both webhooks can use the same secret.
+2. Zoho Books → **Settings → Automation → Workflow Actions → Webhooks → + New Webhook**: Module **Estimates** (or **Sales Orders**),
+   method **POST**, URL `https://<your-domain>/api/zoho/webhooks/quotes` (or `/sales-orders`), **Secret token** = the same
+   secret, body format **Default Payload** (application/json). Save.
+3. **Settings → Automation → Workflow Rules → + New Workflow Rule**: same module, trigger **Created or Edited**;
+   under Actions add type **Webhooks** and pick the webhook from step 2. Save.
+4. Create or edit a quote / sales order in Zoho, then check **Settings → Automation → Workflow Logs** in Zoho (status *Success*)
+   and the record in the dashboard.
+
+Zoho waits 10 s for a reply and treats anything other than 2xx as failed (it retries automatically), so failures are
+returned as errors rather than hidden. A response of `401` means the secret differs; `400` means the body had no
+`estimate_id` / `salesorder_id` (wrong module or wrong URL?); `500` carries the error message.
+
 ## Dispatch batches (internal, not synced to Zoho)
 Sales orders are dispatched in batches. Tables: `sales_order_batches` (batch #, e.g. `SO-00045-B1`) and
 `sales_order_batch_items` (SO + item reference, free-text box info, quantity sent, snapshot of item name/SKU/qty).
@@ -66,6 +99,7 @@ Set these environment variables in Vercel (Project → Settings → Environment 
 | `SUPABASE_SERVICE_ROLE_KEY` | Legacy service_role key — server-only; mark as **Sensitive** |
 | `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET`, `ZOHO_REFRESH_TOKEN` | Zoho OAuth — mark as **Sensitive** |
 | `ZOHO_BOOKS_ORG_ID`, `ZOHO_ACCOUNTS_BASE_URL`, `ZOHO_API_BASE_URL` | Zoho Books organisation / data centre (.in) |
+| `ZOHO_WEBHOOK_SECRET` | 12–50 letters/digits, same as the Zoho webhook's secret token — mark as **Sensitive** |
 
 Never give the service role key a `NEXT_PUBLIC_` prefix. In Supabase → Authentication → URL Configuration,
 set **Site URL** to your Vercel domain.
@@ -87,7 +121,7 @@ src/
     [id]/dispatch/          # new dispatch batch form
     [id]/batches/           # the order's batches, batch detail ([batchId]) and edit
     _dispatch/              # shared batch form, actions, data loader, status badges
-  app/api/zoho/             # item image route
+  app/api/zoho/             # item image route + webhooks/quotes, webhooks/sales-orders (Zoho → app)
   lib/zoho/                 # Zoho Books API client + sync logic
   lib/supabase/             # browser, server, proxy clients + env (URL + anon key)
   lib/auth.ts               # requireUser(): user + profile
