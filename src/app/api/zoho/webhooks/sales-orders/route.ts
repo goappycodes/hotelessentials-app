@@ -11,4 +11,4 @@ export const maxDuration = 60;
 export const GET = () => zohoWebhookHealth("sales-orders");
 
 export const POST = (request: NextRequest) =>
-  handleZohoWebhook(request, { idKey: "sales_order_id", sync: syncSalesOrderFromWebhook, revalidate: "/dashboard/sales-orders" });
+  handleZohoWebhook(request, { idKey: "sales_order_id", run: syncSalesOrderFromWebhook, revalidate: "/dashboard/sales-orders" });

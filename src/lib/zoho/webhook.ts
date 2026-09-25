@@ -64,12 +64,12 @@ export function extractZohoId(rawBody: string, contentType: string, idKey: strin
  * The request handling shared by every Zoho webhook route. Zoho is not signed in to the app, so the request
  * is authenticated here: the `X-Zoho-Webhook-Secret` header must equal ZOHO_WEBHOOK_SECRET, and the payload's
  * `organization_id` must be this app's Zoho organization (ZOHO_BOOKS_ORG_ID). Then it reads the record id
- * (`idKey`), runs `sync` and replies with JSON. Zoho waits 10 s and retries anything that isn't a 2xx, so
- * failures are returned as 4xx/5xx rather than swallowed.
+ * (`idKey`), runs `run` (save or delete the record) and replies with JSON. Zoho waits 10 s and retries
+ * anything that isn't a 2xx, so failures are returned as 4xx/5xx rather than swallowed.
  */
 export async function handleZohoWebhook(
   request: NextRequest,
-  opts: { idKey: string; sync: (id: string) => Promise<object>; revalidate: string },
+  opts: { idKey: string; run: (id: string) => Promise<object>; revalidate: string },
 ): Promise<Response> {
   const reply = (body: Record<string, unknown>, status = 200) => Response.json(body, { status });
 
@@ -99,7 +99,7 @@ export async function handleZohoWebhook(
   }
 
   try {
-    const result = await opts.sync(id);
+    const result = await opts.run(id);
     revalidatePath(opts.revalidate, "layout");
     return reply({ ok: true, ...result });
   } catch (error) {
