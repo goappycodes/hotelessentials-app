@@ -37,11 +37,15 @@ export function toExportRow(item: LineItem, index: number, dispatch?: ItemDispat
   };
 }
 
-export type ItemsSheet = { name: string; rows: SalesOrderItemsExportRow[] };
+/** A row of the multi-order export, which also names the sales order the item belongs to. */
+export type RemainingItemsExportRow = SalesOrderItemsExportRow & { salesorder_number: string };
+
+export type ItemsSheet = { name: string; rows: RemainingItemsExportRow[] };
 
 /**
- * One sheet per sales order holding only the items still to be sent. `pending` maps a line item's id
- * to its dispatch totals for items with quantity remaining; orders with none are left out.
+ * One sheet per sales order holding only the items still to be sent, each row tagged with the order's
+ * number. `pending` maps a line item's id to its dispatch totals for items with quantity remaining;
+ * orders with none are left out.
  */
 export function remainingItemSheets(
   orders: { salesorder_number: string; sales_order_items: (LineItem & { id: string })[] }[],
@@ -51,7 +55,7 @@ export function remainingItemSheets(
   for (const order of orders) {
     const rows = order.sales_order_items.flatMap((item, index) => {
       const dispatch = pending.get(item.id);
-      return dispatch ? [toExportRow(item, index, dispatch)] : [];
+      return dispatch ? [{ salesorder_number: order.salesorder_number, ...toExportRow(item, index, dispatch) }] : [];
     });
     if (rows.length) sheets.push({ name: order.salesorder_number, rows });
   }
@@ -64,11 +68,20 @@ function newWorkbook() {
   return workbook;
 }
 
-/** Adds the Items table (Serial No, Item, HSN/SAC, QTY, Item Sent, Item Remaining) as a worksheet. */
-function addItemsSheet(workbook: ExcelJS.Workbook, name: string, rows: SalesOrderItemsExportRow[]) {
+/**
+ * Adds the Items table (Serial No, Item, HSN/SAC, QTY, Item Sent, Item Remaining) as a worksheet. Rows
+ * that carry a `salesorder_number` get it as a "Sales Order No" column right after Serial No.
+ */
+function addItemsSheet(
+  workbook: ExcelJS.Workbook,
+  name: string,
+  rows: (SalesOrderItemsExportRow & { salesorder_number?: string })[],
+) {
+  const withOrderNumber = rows.some((row) => row.salesorder_number !== undefined);
   const sheet = workbook.addWorksheet(name, { views: [{ state: "frozen", ySplit: 1 }] });
   sheet.columns = [
     { header: "Serial No", key: "serial", width: 10 },
+    ...(withOrderNumber ? [{ header: "Sales Order No", key: "salesorder_number", width: 18 }] : []),
     { header: "Item", key: "item", width: 60 },
     { header: "HSN/SAC", key: "hsn_or_sac", width: 14 },
     { header: "QTY", key: "quantity", width: 10 },
@@ -82,6 +95,7 @@ function addItemsSheet(workbook: ExcelJS.Workbook, name: string, rows: SalesOrde
   // Column alignment first; the header row is styled afterwards so it wins.
   sheet.getColumn("item").alignment = { wrapText: true, vertical: "top" };
   sheet.getColumn("hsn_or_sac").alignment = { horizontal: "left", vertical: "top" };
+  if (withOrderNumber) sheet.getColumn("salesorder_number").alignment = { horizontal: "left", vertical: "top" };
   for (const key of ["serial", "quantity", "sent", "remaining"]) {
     sheet.getColumn(key).alignment = { horizontal: "right", vertical: "top" };
   }

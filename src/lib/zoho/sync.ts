@@ -19,6 +19,8 @@ export type SyncResult = {
   deleted: number;
 };
 
+type AdminClient = ReturnType<typeof createAdminClient>;
+
 // Zoho sends "" for empty values and "+0530"-style offsets; normalise for Postgres.
 const text = (value: unknown) => (typeof value === "string" && value.trim() !== "" ? value : null);
 const num = (value: unknown) => (value === "" || value == null || Number.isNaN(Number(value)) ? null : Number(value));
@@ -102,6 +104,92 @@ function toItemRow(salesOrderId: string, li: ZohoLineItem) {
 }
 
 /**
+ * Saves one Zoho sales order locally: the order and its line items (removing items deleted in Zoho).
+ * Shared by the Sync button and the Zoho webhook so both write identical data. Line items are upserted
+ * by their Zoho id, so an item keeps its local id — and the dispatch batches that point at it — across updates.
+ */
+async function saveSalesOrder(db: AdminClient, so: ZohoSalesOrder) {
+  const { data: saved, error: orderError } = await db
+    .from("sales_orders")
+    .upsert(toSalesOrderRow(so), { onConflict: "zoho_salesorder_id" })
+    .select("id")
+    .single();
+  if (orderError) throw new Error(`${so.salesorder_number}: ${orderError.message}`);
+
+  const items = (so.line_items ?? []).map((li) => toItemRow(saved.id, li));
+  if (items.length) {
+    const { error: itemsError } = await db
+      .from("sales_order_items")
+      .upsert(items, { onConflict: "zoho_line_item_id" });
+    if (itemsError) throw new Error(`${so.salesorder_number} items: ${itemsError.message}`);
+  }
+
+  // Remove line items that were deleted from the order in Zoho.
+  let staleItems = db.from("sales_order_items").delete().eq("sales_order_id", saved.id);
+  if (items.length) {
+    staleItems = staleItems.not("zoho_line_item_id", "in", `(${items.map((i) => i.zoho_line_item_id).join(",")})`);
+  }
+  const { error: staleError } = await staleItems;
+  if (staleError) throw new Error(`${so.salesorder_number} cleanup: ${staleError.message}`);
+}
+
+/**
+ * Runs one webhook-triggered sync of a single record and logs it in zoho_sync_runs, like a Sync-button run.
+ * Any failure is recorded on the run and re-thrown so the webhook replies with an error (and Zoho retries).
+ */
+async function runWebhookSync<T>(resource: "quotes" | "sales_orders", work: (db: AdminClient) => Promise<T>): Promise<T> {
+  const db = createAdminClient();
+
+  const { data: run, error: runError } = await db.from("zoho_sync_runs").insert({ resource }).select("id").single();
+  if (runError) throw new Error(`Could not log webhook run: ${runError.message}`);
+
+  try {
+    const result = await work(db);
+    await db
+      .from("zoho_sync_runs")
+      .update({ status: "success", orders_fetched: 1, orders_updated: 1, finished_at: new Date().toISOString() })
+      .eq("id", run.id);
+    return result;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await db
+      .from("zoho_sync_runs")
+      .update({ status: "failed", error: message, finished_at: new Date().toISOString() })
+      .eq("id", run.id);
+    throw new Error(message);
+  }
+}
+
+// Zoho ids are long numeric strings; the id is spliced into a Zoho API path, so accept nothing else.
+const isZohoId = (id: string) => /^\d{5,25}$/.test(id);
+
+export type SalesOrderWebhookResult = { action: "created" | "updated"; salesorder_number: string };
+
+/**
+ * Zoho webhook entry point for sales orders: re-fetches one sales order from Zoho and saves it, creating
+ * the local order if it is new or updating it if it already exists. The webhook body is only used to find
+ * the salesorder id; the data itself always comes from the Zoho API, exactly as in the Sync button.
+ */
+export async function syncSalesOrderFromWebhook(salesorderId: string): Promise<SalesOrderWebhookResult> {
+  if (!isZohoId(salesorderId)) throw new Error("Invalid sales order id");
+
+  return runWebhookSync("sales_orders", async (db) => {
+    const so = await getSalesOrder(salesorderId);
+
+    const { data: existing, error: existingError } = await db
+      .from("sales_orders")
+      .select("id")
+      .eq("zoho_salesorder_id", so.salesorder_id)
+      .maybeSingle();
+    if (existingError) throw new Error(existingError.message);
+
+    await saveSalesOrder(db, so);
+
+    return { action: existing ? "updated" : "created", salesorder_number: so.salesorder_number };
+  });
+}
+
+/**
  * Pulls sales orders from Zoho Books into sales_orders / sales_order_items.
  * Only orders whose last_modified_time changed are re-fetched in detail;
  * orders deleted in Zoho are removed locally.
@@ -137,29 +225,7 @@ export async function syncSalesOrders({ triggeredBy }: { triggeredBy?: string } 
       if (local && zohoModified === localModified) continue;
 
       const so = await getSalesOrder(summary.salesorder_id);
-
-      const { data: saved, error: orderError } = await db
-        .from("sales_orders")
-        .upsert(toSalesOrderRow(so), { onConflict: "zoho_salesorder_id" })
-        .select("id")
-        .single();
-      if (orderError) throw new Error(`${so.salesorder_number}: ${orderError.message}`);
-
-      const items = (so.line_items ?? []).map((li) => toItemRow(saved.id, li));
-      if (items.length) {
-        const { error: itemsError } = await db
-          .from("sales_order_items")
-          .upsert(items, { onConflict: "zoho_line_item_id" });
-        if (itemsError) throw new Error(`${so.salesorder_number} items: ${itemsError.message}`);
-      }
-
-      // Remove line items that were deleted from the order in Zoho.
-      let staleItems = db.from("sales_order_items").delete().eq("sales_order_id", saved.id);
-      if (items.length) {
-        staleItems = staleItems.not("zoho_line_item_id", "in", `(${items.map((i) => i.zoho_line_item_id).join(",")})`);
-      }
-      const { error: staleError } = await staleItems;
-      if (staleError) throw new Error(`${so.salesorder_number} cleanup: ${staleError.message}`);
+      await saveSalesOrder(db, so);
 
       result.updated++;
     }
@@ -274,6 +340,82 @@ function toQuoteItemRow(quoteId: string, li: ZohoLineItem) {
 }
 
 /**
+ * Saves one Zoho estimate locally: the quote, its line items (removing items deleted in Zoho) and the
+ * customer's addresses. Shared by the Sync button and the Zoho webhook so both write identical data.
+ * `contactCache` lets a bulk sync look each customer up only once.
+ */
+async function saveQuote(db: AdminClient, est: ZohoEstimate, contactCache: Map<string, ZohoContact | null>) {
+  const row = toQuoteRow(est);
+
+  // Pull the customer's billing / shipping address from their contact record,
+  // falling back to whatever the estimate itself carries.
+  if (est.customer_id) {
+    let contact = contactCache.get(est.customer_id);
+    if (contact === undefined) {
+      try {
+        contact = await getContact(est.customer_id);
+      } catch {
+        contact = null;
+      }
+      contactCache.set(est.customer_id, contact);
+    }
+    if (contact) {
+      if (hasAddress(contact.billing_address)) row.billing_address = contact.billing_address;
+      if (hasAddress(contact.shipping_address)) row.shipping_address = contact.shipping_address;
+    }
+  }
+
+  const { data: saved, error: quoteError } = await db
+    .from("quotes")
+    .upsert(row, { onConflict: "zoho_estimate_id" })
+    .select("id")
+    .single();
+  if (quoteError) throw new Error(`${est.estimate_number}: ${quoteError.message}`);
+
+  const items = (est.line_items ?? []).map((li) => toQuoteItemRow(saved.id, li));
+  if (items.length) {
+    const { error: itemsError } = await db
+      .from("quote_items")
+      .upsert(items, { onConflict: "zoho_line_item_id" });
+    if (itemsError) throw new Error(`${est.estimate_number} items: ${itemsError.message}`);
+  }
+
+  // Remove line items that were deleted from the quote in Zoho.
+  let staleItems = db.from("quote_items").delete().eq("quote_id", saved.id);
+  if (items.length) {
+    staleItems = staleItems.not("zoho_line_item_id", "in", `(${items.map((i) => i.zoho_line_item_id).join(",")})`);
+  }
+  const { error: staleError } = await staleItems;
+  if (staleError) throw new Error(`${est.estimate_number} cleanup: ${staleError.message}`);
+}
+
+export type QuoteWebhookResult = { action: "created" | "updated"; estimate_number: string };
+
+/**
+ * Zoho webhook entry point: re-fetches one estimate from Zoho and saves it, creating the local quote if
+ * it is new or updating it if it already exists. The webhook body is only used to find the estimate id;
+ * the data itself always comes from the Zoho API, exactly as in the Sync button. Logged like a sync run.
+ */
+export async function syncQuoteFromWebhook(estimateId: string): Promise<QuoteWebhookResult> {
+  if (!isZohoId(estimateId)) throw new Error("Invalid estimate id");
+
+  return runWebhookSync("quotes", async (db) => {
+    const est = await getEstimate(estimateId);
+
+    const { data: existing, error: existingError } = await db
+      .from("quotes")
+      .select("id")
+      .eq("zoho_estimate_id", est.estimate_id)
+      .maybeSingle();
+    if (existingError) throw new Error(existingError.message);
+
+    await saveQuote(db, est, new Map());
+
+    return { action: existing ? "updated" : "created", estimate_number: est.estimate_number };
+  });
+}
+
+/**
  * Pulls quotes (estimates) from Zoho Books into quotes / quote_items.
  * Read-only: only fetches from Zoho and never writes back. Only estimates whose
  * last_modified_time changed are re-fetched in detail; estimates deleted in Zoho
@@ -313,48 +455,7 @@ export async function syncQuotes({ triggeredBy }: { triggeredBy?: string } = {})
       if (local && zohoModified === localModified) continue;
 
       const est = await getEstimate(summary.estimate_id);
-      const row = toQuoteRow(est);
-
-      // Pull the customer's billing / shipping address from their contact record,
-      // falling back to whatever the estimate itself carries.
-      if (est.customer_id) {
-        let contact = contactCache.get(est.customer_id);
-        if (contact === undefined) {
-          try {
-            contact = await getContact(est.customer_id);
-          } catch {
-            contact = null;
-          }
-          contactCache.set(est.customer_id, contact);
-        }
-        if (contact) {
-          if (hasAddress(contact.billing_address)) row.billing_address = contact.billing_address;
-          if (hasAddress(contact.shipping_address)) row.shipping_address = contact.shipping_address;
-        }
-      }
-
-      const { data: saved, error: quoteError } = await db
-        .from("quotes")
-        .upsert(row, { onConflict: "zoho_estimate_id" })
-        .select("id")
-        .single();
-      if (quoteError) throw new Error(`${est.estimate_number}: ${quoteError.message}`);
-
-      const items = (est.line_items ?? []).map((li) => toQuoteItemRow(saved.id, li));
-      if (items.length) {
-        const { error: itemsError } = await db
-          .from("quote_items")
-          .upsert(items, { onConflict: "zoho_line_item_id" });
-        if (itemsError) throw new Error(`${est.estimate_number} items: ${itemsError.message}`);
-      }
-
-      // Remove line items that were deleted from the quote in Zoho.
-      let staleItems = db.from("quote_items").delete().eq("quote_id", saved.id);
-      if (items.length) {
-        staleItems = staleItems.not("zoho_line_item_id", "in", `(${items.map((i) => i.zoho_line_item_id).join(",")})`);
-      }
-      const { error: staleError } = await staleItems;
-      if (staleError) throw new Error(`${est.estimate_number} cleanup: ${staleError.message}`);
+      await saveQuote(db, est, contactCache);
 
       result.updated++;
     }
