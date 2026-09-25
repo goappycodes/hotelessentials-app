@@ -133,11 +133,19 @@ async function saveSalesOrder(db: AdminClient, so: ZohoSalesOrder) {
   if (staleError) throw new Error(`${so.salesorder_number} cleanup: ${staleError.message}`);
 }
 
+type RunCounts = { fetched: number; updated: number; deleted: number };
+const SAVED: RunCounts = { fetched: 1, updated: 1, deleted: 0 };
+
 /**
- * Runs one webhook-triggered sync of a single record and logs it in zoho_sync_runs, like a Sync-button run.
+ * Runs one webhook-triggered operation on a single record and logs it in zoho_sync_runs, like a Sync-button run.
+ * `counts` says what to record for the run (by default: one record fetched and saved).
  * Any failure is recorded on the run and re-thrown so the webhook replies with an error (and Zoho retries).
  */
-async function runWebhookSync<T>(resource: "quotes" | "sales_orders", work: (db: AdminClient) => Promise<T>): Promise<T> {
+async function runWebhookSync<T>(
+  resource: "quotes" | "sales_orders",
+  work: (db: AdminClient) => Promise<T>,
+  counts: (result: T) => RunCounts = () => SAVED,
+): Promise<T> {
   const db = createAdminClient();
 
   const { data: run, error: runError } = await db.from("zoho_sync_runs").insert({ resource }).select("id").single();
@@ -145,9 +153,16 @@ async function runWebhookSync<T>(resource: "quotes" | "sales_orders", work: (db:
 
   try {
     const result = await work(db);
+    const { fetched, updated, deleted } = counts(result);
     await db
       .from("zoho_sync_runs")
-      .update({ status: "success", orders_fetched: 1, orders_updated: 1, finished_at: new Date().toISOString() })
+      .update({
+        status: "success",
+        orders_fetched: fetched,
+        orders_updated: updated,
+        orders_deleted: deleted,
+        finished_at: new Date().toISOString(),
+      })
       .eq("id", run.id);
     return result;
   } catch (error) {
@@ -187,6 +202,33 @@ export async function syncSalesOrderFromWebhook(salesorderId: string): Promise<S
 
     return { action: existing ? "updated" : "created", salesorder_number: so.salesorder_number };
   });
+}
+
+export type SalesOrderDeleteResult = { action: "deleted"; salesorder_number: string } | { action: "not_found" };
+
+/**
+ * Zoho webhook entry point for a sales order deleted in Zoho: removes the local copy. Makes no request to
+ * Zoho. The order's line items go with it, and so do its dispatch batches (the database cascades), exactly
+ * as when the Sync button removes an order that no longer exists in Zoho. Deleting an order that is already
+ * gone is not an error, so a retried delivery still succeeds.
+ */
+export async function deleteSalesOrderFromWebhook(salesOrderId: string): Promise<SalesOrderDeleteResult> {
+  if (!isZohoId(salesOrderId)) throw new Error("Invalid sales order id");
+
+  return runWebhookSync(
+    "sales_orders",
+    async (db): Promise<SalesOrderDeleteResult> => {
+      const { data, error } = await db
+        .from("sales_orders")
+        .delete()
+        .eq("zoho_salesorder_id", salesOrderId)
+        .select("id, salesorder_number");
+      if (error) throw new Error(error.message);
+
+      return data.length ? { action: "deleted", salesorder_number: data[0].salesorder_number } : { action: "not_found" };
+    },
+    (result) => ({ fetched: 0, updated: 0, deleted: result.action === "deleted" ? 1 : 0 }),
+  );
 }
 
 /**
@@ -413,6 +455,31 @@ export async function syncQuoteFromWebhook(estimateId: string): Promise<QuoteWeb
 
     return { action: existing ? "updated" : "created", estimate_number: est.estimate_number };
   });
+}
+
+export type QuoteDeleteResult = { action: "deleted"; estimate_number: string } | { action: "not_found" };
+
+/**
+ * Zoho webhook entry point for a quote deleted in Zoho: removes the local copy and its line items. Makes no
+ * request to Zoho. Deleting a quote that is already gone is not an error, so a retried delivery still succeeds.
+ */
+export async function deleteQuoteFromWebhook(estimateId: string): Promise<QuoteDeleteResult> {
+  if (!isZohoId(estimateId)) throw new Error("Invalid quote id");
+
+  return runWebhookSync(
+    "quotes",
+    async (db): Promise<QuoteDeleteResult> => {
+      const { data, error } = await db
+        .from("quotes")
+        .delete()
+        .eq("zoho_estimate_id", estimateId)
+        .select("id, estimate_number");
+      if (error) throw new Error(error.message);
+
+      return data.length ? { action: "deleted", estimate_number: data[0].estimate_number } : { action: "not_found" };
+    },
+    (result) => ({ fetched: 0, updated: 0, deleted: result.action === "deleted" ? 1 : 0 }),
+  );
 }
 
 /**

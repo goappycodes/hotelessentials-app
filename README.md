@@ -48,12 +48,14 @@ Sales orders and their line items are imported from Zoho Books into `sales_order
 ## Zoho webhooks (Zoho → app, automatic)
 Zoho Books can push changes to the app so the local copies stay current without clicking **Sync from Zoho**:
 
-| Zoho module | Endpoint | Updates | Record id in the payload |
-| --- | --- | --- | --- |
-| Quotes | `POST /api/zoho/webhooks/quotes` | `quotes` / `quote_items` | `quote_id` |
-| Sales Orders | `POST /api/zoho/webhooks/sales-orders` | `sales_orders` / `sales_order_items` | `sales_order_id` |
+| Zoho module | Event | Endpoint | Effect on the app | Record id in the payload |
+| --- | --- | --- | --- | --- |
+| Quotes | created / edited | `POST /api/zoho/webhooks/quotes` | creates or updates `quotes` / `quote_items` | `quote_id` |
+| Quotes | deleted | `POST /api/zoho/webhooks/quotes/delete` | deletes the quote and its items | `quote_id` |
+| Sales Orders | created / edited | `POST /api/zoho/webhooks/sales-orders` | creates or updates `sales_orders` / `sales_order_items` | `sales_order_id` |
+| Sales Orders | deleted | `POST /api/zoho/webhooks/sales-orders/delete` | deletes the order, its items **and its dispatch batches** | `sales_order_id` |
 
-Both payloads also carry `organization_id`.
+All payloads also carry `organization_id`. The delete endpoints also accept the HTTP method `DELETE`.
 
 - **Authentication:** every request must send the header `X-Zoho-Webhook-Secret` with the value of `ZOHO_WEBHOOK_SECRET`
   (otherwise `401`), and the payload's `organization_id` must equal `ZOHO_BOOKS_ORG_ID` (otherwise `400`). Until both
@@ -62,21 +64,23 @@ Both payloads also carry `organization_id`.
   same save code as the Sync buttons (`saveQuote` / `saveSalesOrder` in `lib/zoho/sync.ts`). Redelivery is harmless
   (idempotent). Sales order line items keep their local ids on update, so dispatch batches stay linked. Each event is
   logged in `zoho_sync_runs` (resource `quotes` / `sales_orders`).
+- **Delete:** removes the local record only, and makes **no request to Zoho**. A sales order's dispatch batches are
+  deleted with it (the database cascades), exactly as when the Sync button removes an order that no longer exists in Zoho.
+  Deleting a record that is already gone returns `200` with `"action":"not_found"`, so a retried delivery still succeeds.
 - **Read-only towards Zoho:** the app never changes Zoho Books data. Its only requests to Zoho are `GET`s (plus the OAuth
-  token refresh).
+  token refresh), and only for create/update; deletes make none.
 - Open an endpoint in a browser to check it is deployed: it returns `{"ok":true,"configured":true,…}`.
-- Not handled: records **deleted** in Zoho (the Sync buttons remove them).
 
-**Set up** (once, then repeat steps 2–3 for the second module)
+**Set up** (once, then repeat steps 2–3 for each row of the table above)
 1. Set `ZOHO_WEBHOOK_SECRET` (Vercel → Environment Variables, and `.env.local` for local runs; mark it Sensitive) and make sure
    `ZOHO_BOOKS_ORG_ID` is set. Redeploy so the server picks them up. Both webhooks can use the same secret.
 2. Zoho Books → **Settings → Automation → Workflow Actions → Webhooks → + New Webhook**: the module (Quotes / Sales Orders),
    method **POST**, URL `https://<your-domain>/api/zoho/webhooks/quotes` (or `/sales-orders`), an **HTTP header**
    `X-Zoho-Webhook-Secret` = the secret, and a JSON body containing the record id and `organization_id`. Save.
-3. **Settings → Automation → Workflow Rules → + New Workflow Rule**: same module, trigger **Created or Edited**;
-   under Actions add type **Webhooks** and pick the webhook from step 2. Save.
-4. Create or edit a quote / sales order in Zoho, then check **Settings → Automation → Workflow Logs** in Zoho (status *Success*)
-   and the record in the dashboard.
+3. **Settings → Automation → Workflow Rules → + New Workflow Rule**: same module, trigger **Created or Edited** (or
+   **Deleted** for the delete endpoints); under Actions add type **Webhooks** and pick the webhook from step 2. Save.
+4. Create, edit or delete a quote / sales order in Zoho, then check **Settings → Automation → Workflow Logs** in Zoho
+   (status *Success*) and the record in the dashboard.
 
 Zoho waits 10 s for a reply and treats anything other than 2xx as failed (it retries automatically), so failures are
 returned as errors rather than hidden. `401` means the secret header is missing or wrong; `400` means the payload had no
@@ -125,7 +129,7 @@ src/
     [id]/dispatch/          # new dispatch batch form
     [id]/batches/           # the order's batches, batch detail ([batchId]) and edit
     _dispatch/              # shared batch form, actions, data loader, status badges
-  app/api/zoho/             # item image route + webhooks/quotes, webhooks/sales-orders (Zoho → app)
+  app/api/zoho/             # item image route + webhooks/{quotes,sales-orders}[/delete] (Zoho → app)
   lib/zoho/                 # Zoho Books API client + sync logic
   lib/supabase/             # browser, server, proxy clients + env (URL + anon key)
   lib/auth.ts               # requireUser(): user + profile
