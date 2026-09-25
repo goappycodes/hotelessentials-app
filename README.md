@@ -70,6 +70,14 @@ All payloads also carry `organization_id`. The delete endpoints also accept the 
 - **Read-only towards Zoho:** the app never changes Zoho Books data. Its only requests to Zoho are `GET`s (plus the OAuth
   token refresh), and only for create/update; deletes make none.
 - Open an endpoint in a browser to check it is deployed: it returns `{"ok":true,"configured":true,…}`.
+- **Where the ids can be:** in the body (JSON or form fields, at any depth — the format is detected from the content, not the
+  `Content-Type` header, which Zoho does not always set to match) or as URL query parameters.
+
+**Debugging a failing webhook.** Every request writes one JSON line starting `[zoho-webhook]` (Vercel → Logs → search for
+that): `unauthorized` (secret header missing/different — lengths only, never the value), `rejected` (a 400: what was
+found, the payload's vs the expected `organization_id`, and a body preview), `ok`, `failed`. The 400 response body has the
+same `received` summary, so Zoho's Workflow Logs show it too. Set `ZOHO_WEBHOOK_DEBUG=1` to also log every accepted payload.
+If nothing is logged, the request never reached the app (check the URL and Vercel's deployment protection).
 
 **Set up** (once, then repeat steps 2–3 for each row of the table above)
 1. Set `ZOHO_WEBHOOK_SECRET` (Vercel → Environment Variables, and `.env.local` for local runs; mark it Sensitive) and make sure
