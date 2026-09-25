@@ -1,7 +1,7 @@
 import type { NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { getItemImage } from "@/lib/zoho/client";
 import { renderQuotePdf, type QuotePdfItem } from "@/lib/pdf/quote-pdf";
+import { fetchItemImage, pickField, sanitizeFilename } from "@/lib/pdf/route-helpers";
 
 // Generating the PDF fetches each item's image from Zoho (rate-limited), so allow time.
 export const runtime = "nodejs";
@@ -35,30 +35,6 @@ type QuoteRow = {
   quote_items: QuoteItemRow[];
 };
 
-// Zoho stores the customer's GST/PAN in different places across editions; look in the
-// most common ones (top-level estimate fields, then custom fields).
-function pick(raw: Record<string, unknown> | null, custom: QuoteRow["custom_fields"], keys: string[], labelMatch: RegExp) {
-  for (const key of keys) {
-    const value = raw?.[key];
-    if (typeof value === "string" && value.trim()) return value.trim();
-  }
-  for (const field of custom ?? []) {
-    if (field.label && labelMatch.test(field.label) && typeof field.value === "string" && field.value.trim()) {
-      return field.value.trim();
-    }
-  }
-  return null;
-}
-
-function imageFormat(contentType: string): "png" | "jpg" | null {
-  if (contentType === "image/png") return "png";
-  if (contentType === "image/jpeg" || contentType === "image/jpg") return "jpg";
-  return null;
-}
-
-function sanitizeFilename(name: string) {
-  return name.replace(/[\\/:*?"<>|]/g, " ").replace(/\s+/g, " ").trim();
-}
 
 export async function GET(_request: NextRequest, ctx: RouteContext<"/dashboard/quotes/[id]/pdf">) {
   const supabase = await createClient();
@@ -82,19 +58,10 @@ export async function GET(_request: NextRequest, ctx: RouteContext<"/dashboard/q
 
   if (!quote) return new Response("Not found", { status: 404 });
 
-  // Fetch item images from Zoho (read-only). Skip items without an image.
+  // Fetch item images from Zoho (read-only). Items without an image are skipped.
   const items: QuotePdfItem[] = [];
   for (const row of quote.quote_items) {
-    let image: QuotePdfItem["image"] = null;
-    if (row.zoho_item_id && row.image_document_id && /^\d+$/.test(row.zoho_item_id)) {
-      try {
-        const fetched = await getItemImage(row.zoho_item_id);
-        const format = fetched && imageFormat(fetched.contentType);
-        if (fetched && format) image = { data: Buffer.from(fetched.body), format };
-      } catch {
-        // Ignore image failures — the quote still renders without the picture.
-      }
-    }
+    const image = await fetchItemImage(row.zoho_item_id, row.image_document_id);
     items.push({
       item_order: row.item_order,
       name: row.name,
@@ -117,8 +84,8 @@ export async function GET(_request: NextRequest, ctx: RouteContext<"/dashboard/q
     customer_name: quote.customer_name,
     billing_address: quote.billing_address,
     phone: (typeof billing.phone === "string" && billing.phone.trim()) || null,
-    pan_no: pick(raw, quote.custom_fields, ["pan_no", "cf_pan_no", "customer_pan_no"], /pan/i),
-    gst_no: pick(raw, quote.custom_fields, ["gst_no", "cf_gst_no", "customer_gst_no"], /gst/i),
+    pan_no: pickField(raw, quote.custom_fields, ["pan_no", "cf_pan_no", "customer_pan_no"], /pan/i),
+    gst_no: pickField(raw, quote.custom_fields, ["gst_no", "cf_gst_no", "customer_gst_no"], /gst/i),
     currency_code: quote.currency_code,
     sub_total: quote.sub_total,
     tax_total: quote.tax_total,

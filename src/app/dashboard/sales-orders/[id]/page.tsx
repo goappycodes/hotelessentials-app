@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft, PackagePlus, Truck } from "lucide-react";
+import { ArrowLeft, Download, FileSpreadsheet, PackagePlus, Truck } from "lucide-react";
 import { ItemImage } from "@/components/item-image";
 import { createClient } from "@/lib/supabase/server";
 import { DispatchStatusBadge, formatQty, RemainingBadge } from "@/app/dashboard/sales-orders/_dispatch/dispatch-status";
@@ -156,12 +156,21 @@ export default async function SalesOrderPage({ params }: PageProps<"/dashboard/s
               {order.sales_order_items.length} line items · {order.total_quantity ?? 0} units
             </p>
           </div>
-          <Link
-            href={`/dashboard/sales-orders/${order.id}/dispatch`}
-            className="flex h-10 items-center gap-2 self-start rounded-xl bg-slate-900 px-4 text-sm font-medium text-white shadow-lg shadow-slate-900/10 transition hover:bg-slate-800 sm:self-auto"
-          >
-            <Truck className="size-4" /> Dispatch items
-          </Link>
+          <div className="flex flex-wrap items-center gap-2">
+            <a
+              href={`/dashboard/sales-orders/${order.id}/export`}
+              title="Download the items table as an Excel file"
+              className="flex h-10 items-center gap-2 rounded-xl border border-slate-200 px-4 text-sm font-medium text-slate-600 transition hover:border-brand-300 hover:bg-brand-50 hover:text-brand-700"
+            >
+              <FileSpreadsheet className="size-4" /> Export remaining items
+            </a>
+            <Link
+              href={`/dashboard/sales-orders/${order.id}/dispatch`}
+              className="flex h-10 items-center gap-2 rounded-xl bg-slate-900 px-4 text-sm font-medium text-white shadow-lg shadow-slate-900/10 transition hover:bg-slate-800"
+            >
+              <Truck className="size-4" /> Dispatch items
+            </Link>
+          </div>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[1080px] text-left text-sm">
@@ -260,7 +269,7 @@ export default async function SalesOrderPage({ params }: PageProps<"/dashboard/s
         </div>
         {!!batches?.length && (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[640px] text-left text-sm">
+            <table className="w-full min-w-[740px] text-left text-sm">
               <thead className="border-y border-slate-100 bg-slate-50/70 text-xs uppercase tracking-wide text-slate-500">
                 <tr>
                   <th className="px-5 py-3 font-medium">Batch #</th>
@@ -268,6 +277,7 @@ export default async function SalesOrderPage({ params }: PageProps<"/dashboard/s
                   <th className="px-5 py-3 text-right font-medium">Total qty</th>
                   <th className="px-5 py-3 text-right font-medium">Boxes</th>
                   <th className="px-5 py-3 font-medium">Created</th>
+                  <th className="px-5 py-3 text-right font-medium">Export</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -283,6 +293,17 @@ export default async function SalesOrderPage({ params }: PageProps<"/dashboard/s
                     <td className="px-5 py-3 text-right text-slate-600 tabular-nums">{b.box_count}</td>
                     <td className="px-5 py-3 text-slate-600">
                       {formatDateTime(b.created_at)} <span className="text-xs text-slate-400">· {b.created_by_email ?? "—"}</span>
+                    </td>
+                    <td className="px-5 py-3 text-right">
+                      <a
+                        href={`/dashboard/sales-orders/${order.id}/batches/${b.id}/pdf`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title="Open dispatch PDF in a new tab"
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-medium text-slate-600 transition hover:border-brand-300 hover:bg-brand-50 hover:text-brand-700"
+                      >
+                        <Download className="size-3.5" /> PDF
+                      </a>
                     </td>
                   </tr>
                 ))}

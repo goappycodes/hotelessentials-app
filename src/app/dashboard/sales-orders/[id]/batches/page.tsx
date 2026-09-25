@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft, PackageOpen, PackagePlus } from "lucide-react";
+import { ArrowLeft, Download, PackageOpen, PackagePlus } from "lucide-react";
 import { createClient } from "@/lib/supabase/server";
 import { DispatchStatusBadge, formatQty } from "@/app/dashboard/sales-orders/_dispatch/dispatch-status";
 import { formatDateTime } from "../../format";
@@ -91,7 +91,7 @@ export default async function SalesOrderBatchesPage({ params }: PageProps<"/dash
       {/* Batches */}
       <section className="overflow-hidden rounded-2xl border border-slate-200/70 bg-white shadow-sm">
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[820px] text-left text-sm">
+          <table className="w-full min-w-[920px] text-left text-sm">
             <thead className="bg-slate-50/70 text-xs uppercase tracking-wide text-slate-500">
               <tr>
                 <th className="px-5 py-3 font-medium">Batch #</th>
@@ -100,6 +100,7 @@ export default async function SalesOrderBatchesPage({ params }: PageProps<"/dash
                 <th className="px-5 py-3 text-right font-medium">Boxes</th>
                 <th className="px-5 py-3 font-medium">Created</th>
                 <th className="px-5 py-3 font-medium">Last edited</th>
+                <th className="px-5 py-3 text-right font-medium">Export</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -126,6 +127,17 @@ export default async function SalesOrderBatchesPage({ params }: PageProps<"/dash
                     ) : (
                       <span className="text-slate-400">—</span>
                     )}
+                  </td>
+                  <td className="px-5 py-3.5 text-right">
+                    <a
+                      href={`${orderHref}/batches/${b.id}/pdf`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title="Open dispatch PDF in a new tab"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-medium text-slate-600 transition hover:border-brand-300 hover:bg-brand-50 hover:text-brand-700"
+                    >
+                      <Download className="size-3.5" /> PDF
+                    </a>
                   </td>
                 </tr>
               ))}
