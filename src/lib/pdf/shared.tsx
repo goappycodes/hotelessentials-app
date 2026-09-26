@@ -28,6 +28,23 @@ export function registerFonts() {
   fontsRegistered = true;
 }
 
+/**
+ * The width in points of the widest of `texts` set in Arimo Regular at `fontSize`. react-pdf has no automatic
+ * table layout, so a column that must fit its content is sized from this.
+ */
+export async function widestTextWidth(texts: string[], fontSize: number): Promise<number> {
+  registerFonts();
+  await Font.load({ fontFamily: "Arimo" });
+  const font = Font.getFont({ fontFamily: "Arimo" }).data;
+  if (!font) throw new Error("The Arimo font did not load.");
+
+  let widest = 0;
+  for (const text of new Set(texts)) {
+    widest = Math.max(widest, (font.layout(text).advanceWidth * fontSize) / font.unitsPerEm);
+  }
+  return widest;
+}
+
 let logoData: Buffer | null = null;
 function getLogo() {
   if (!logoData) logoData = fs.readFileSync(path.join(assetDir, "logo.png"));

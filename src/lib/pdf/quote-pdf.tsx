@@ -10,7 +10,17 @@ import {
   View,
 } from "@react-pdf/renderer";
 import { amountInWords } from "./amount-in-words";
-import { BORDER, baseStyles, COMPANY, formatDate, MUTED, PdfHeader, PdfRecipient, registerFonts } from "./shared";
+import {
+  BORDER,
+  baseStyles,
+  COMPANY,
+  formatDate,
+  MUTED,
+  PdfHeader,
+  PdfRecipient,
+  registerFonts,
+  widestTextWidth,
+} from "./shared";
 
 // Data shape -------------------------------------------------------------------
 export type QuotePdfItem = {
@@ -56,8 +66,32 @@ function formatPct(value: number | null) {
   return `${Number(value).toFixed(1)}%`;
 }
 
-// Column widths (must sum to 100).
-const COLS = { sno: 6, image: 14, code: 12, name: 32, qty: 8, rate: 11, taxable: 11, gst: 6 };
+// Column widths, as a percentage of the table. These columns keep their width; the Code column is sized to its
+// longest value and the Name column (which wraps freely) takes whatever is left (see columnWidths).
+const FIXED_COLS = { sno: 6, image: 14, qty: 8, rate: 11, taxable: 11, gst: 6 };
+const FIXED_COLS_TOTAL = Object.values(FIXED_COLS).reduce((sum, width) => sum + width, 0);
+
+// Bounds for the Code column: not narrower than its header, and not so wide that Name is left too little room.
+// A code longer than the maximum allows (about 30 characters) no longer fits its cell.
+const CODE_MIN_PCT = 6;
+const NAME_MIN_PCT = 15;
+const CODE_MAX_PCT = 100 - FIXED_COLS_TOTAL - NAME_MIN_PCT;
+
+const A4_WIDTH = 595.28;
+const TABLE_WIDTH = A4_WIDTH - 2 * baseStyles.page.paddingHorizontal - baseStyles.table.borderLeftWidth;
+
+type Cols = typeof FIXED_COLS & { code: number; name: number };
+
+/**
+ * The column widths for these items: Code is exactly as wide as its longest value (plus the cell's padding and
+ * border, and a little slack so it never wraps), Name takes the rest, and the other columns keep their width.
+ */
+async function columnWidths(items: QuotePdfItem[]): Promise<Cols> {
+  const widest = await widestTextWidth(items.map((item) => item.sku ?? "—"), baseStyles.page.fontSize);
+  const cellChrome = 2 * baseStyles.cell.paddingHorizontal + baseStyles.cell.borderRightWidth + 2;
+  const code = Math.min(CODE_MAX_PCT, Math.max(CODE_MIN_PCT, ((widest + cellChrome) / TABLE_WIDTH) * 100));
+  return { ...FIXED_COLS, code, name: 100 - FIXED_COLS_TOTAL - code };
+}
 
 const s = {
   ...baseStyles,
@@ -100,7 +134,7 @@ const s = {
   }),
 };
 
-function QuoteDocument({ data }: { data: QuotePdfData }) {
+function QuoteDocument({ data, cols }: { data: QuotePdfData; cols: Cols }) {
   const currency = data.currency_code ?? "INR";
   const money = moneyFmt(currency);
 
@@ -124,42 +158,42 @@ function QuoteDocument({ data }: { data: QuotePdfData }) {
         <View style={s.table}>
           {/* Header (repeats on each page) */}
           <View style={s.row} fixed>
-            <Text style={[s.headerCell, { width: `${COLS.sno}%` }]}>S.No.</Text>
-            <Text style={[s.headerCell, { width: `${COLS.image}%` }]}>Image</Text>
-            <Text style={[s.headerCell, { width: `${COLS.code}%` }]}>Code</Text>
-            <Text style={[s.headerCell, { width: `${COLS.name}%` }]}>Name</Text>
-            <Text style={[s.headerCell, { width: `${COLS.qty}%` }]}>Qty</Text>
-            <Text style={[s.headerCell, { width: `${COLS.rate}%` }]}>Selling Rate</Text>
-            <Text style={[s.headerCell, { width: `${COLS.taxable}%` }]}>Taxable Amount</Text>
-            <Text style={[s.headerCell, { width: `${COLS.gst}%` }]}>GST</Text>
+            <Text style={[s.headerCell, { width: `${cols.sno}%` }]}>S.No.</Text>
+            <Text style={[s.headerCell, { width: `${cols.image}%` }]}>Image</Text>
+            <Text style={[s.headerCell, { width: `${cols.code}%` }]}>Code</Text>
+            <Text style={[s.headerCell, { width: `${cols.name}%` }]}>Name</Text>
+            <Text style={[s.headerCell, { width: `${cols.qty}%` }]}>Qty</Text>
+            <Text style={[s.headerCell, { width: `${cols.rate}%` }]}>Selling Rate</Text>
+            <Text style={[s.headerCell, { width: `${cols.taxable}%` }]}>Taxable Amount</Text>
+            <Text style={[s.headerCell, { width: `${cols.gst}%` }]}>GST</Text>
           </View>
 
           {/* Rows */}
           {data.items.map((item, index) => (
             <View key={index} style={s.row} wrap={false}>
-              <View style={[s.cell, { width: `${COLS.sno}%`, alignItems: "center" }]}>
+              <View style={[s.cell, { width: `${cols.sno}%`, alignItems: "center" }]}>
                 <Text>{item.item_order ?? index + 1}</Text>
               </View>
-              <View style={[s.cell, { width: `${COLS.image}%`, alignItems: "center" }]}>
+              <View style={[s.cell, { width: `${cols.image}%`, alignItems: "center" }]}>
                 {item.image ? <Image style={s.itemImage} src={item.image} /> : <Text> </Text>}
               </View>
-              <View style={[s.cell, { width: `${COLS.code}%`, alignItems: "center" }]}>
+              <View style={[s.cell, { width: `${cols.code}%`, alignItems: "center" }]}>
                 <Text>{item.sku ?? "—"}</Text>
               </View>
-              <View style={[s.cell, { width: `${COLS.name}%` }]}>
+              <View style={[s.cell, { width: `${cols.name}%` }]}>
                 <Text style={s.itemName}>{item.name}</Text>
                 {item.description ? <Text style={s.itemDesc}>{item.description}</Text> : null}
               </View>
-              <View style={[s.cell, { width: `${COLS.qty}%`, alignItems: "center" }]}>
+              <View style={[s.cell, { width: `${cols.qty}%`, alignItems: "center" }]}>
                 <Text>{formatQty(item.quantity)}</Text>
               </View>
-              <View style={[s.cell, { width: `${COLS.rate}%`, alignItems: "flex-end" }]}>
+              <View style={[s.cell, { width: `${cols.rate}%`, alignItems: "flex-end" }]}>
                 <Text>{money(item.rate)}</Text>
               </View>
-              <View style={[s.cell, { width: `${COLS.taxable}%`, alignItems: "flex-end" }]}>
+              <View style={[s.cell, { width: `${cols.taxable}%`, alignItems: "flex-end" }]}>
                 <Text>{money(item.item_sub_total ?? Number(item.rate ?? 0) * Number(item.quantity ?? 0))}</Text>
               </View>
-              <View style={[s.cell, { width: `${COLS.gst}%`, alignItems: "center" }]}>
+              <View style={[s.cell, { width: `${cols.gst}%`, alignItems: "center" }]}>
                 <Text>{formatPct(item.tax_percentage)}</Text>
               </View>
             </View>
@@ -212,5 +246,6 @@ function QuoteDocument({ data }: { data: QuotePdfData }) {
 
 export async function renderQuotePdf(data: QuotePdfData): Promise<Buffer> {
   registerFonts();
-  return renderToBuffer(<QuoteDocument data={data} />);
+  const cols = await columnWidths(data.items);
+  return renderToBuffer(<QuoteDocument data={data} cols={cols} />);
 }
