@@ -1,5 +1,6 @@
 import "server-only";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { describeError, webhookLog } from "./webhook-log";
 import {
   getContact,
   getEstimate,
@@ -114,14 +115,14 @@ async function saveSalesOrder(db: AdminClient, so: ZohoSalesOrder) {
     .upsert(toSalesOrderRow(so), { onConflict: "zoho_salesorder_id" })
     .select("id")
     .single();
-  if (orderError) throw new Error(`${so.salesorder_number}: ${orderError.message}`);
+  if (orderError) throw new Error(`${so.salesorder_number}: ${orderError.message}`, { cause: orderError });
 
   const items = (so.line_items ?? []).map((li) => toItemRow(saved.id, li));
   if (items.length) {
     const { error: itemsError } = await db
       .from("sales_order_items")
       .upsert(items, { onConflict: "zoho_line_item_id" });
-    if (itemsError) throw new Error(`${so.salesorder_number} items: ${itemsError.message}`);
+    if (itemsError) throw new Error(`${so.salesorder_number} items: ${itemsError.message}`, { cause: itemsError });
   }
 
   // Remove line items that were deleted from the order in Zoho.
@@ -130,7 +131,7 @@ async function saveSalesOrder(db: AdminClient, so: ZohoSalesOrder) {
     staleItems = staleItems.not("zoho_line_item_id", "in", `(${items.map((i) => i.zoho_line_item_id).join(",")})`);
   }
   const { error: staleError } = await staleItems;
-  if (staleError) throw new Error(`${so.salesorder_number} cleanup: ${staleError.message}`);
+  if (staleError) throw new Error(`${so.salesorder_number} cleanup: ${staleError.message}`, { cause: staleError });
 }
 
 type RunCounts = { fetched: number; updated: number; deleted: number };
@@ -149,29 +150,27 @@ async function runWebhookSync<T>(
   const db = createAdminClient();
 
   const { data: run, error: runError } = await db.from("zoho_sync_runs").insert({ resource }).select("id").single();
-  if (runError) throw new Error(`Could not log webhook run: ${runError.message}`);
+  if (runError) throw new Error(`Could not log webhook run: ${runError.message}`, { cause: runError });
+
+  // The run row is only a record of the outcome, so a failure to update it is logged rather than replacing the real result.
+  const finishRun = async (fields: Record<string, unknown>) => {
+    const { error } = await db
+      .from("zoho_sync_runs")
+      .update({ ...fields, finished_at: new Date().toISOString() })
+      .eq("id", run.id);
+    if (error) webhookLog("error", "sync_run_update_failed", { resource, runId: run.id, error: describeError(error) });
+  };
 
   try {
     const result = await work(db);
     const { fetched, updated, deleted } = counts(result);
-    await db
-      .from("zoho_sync_runs")
-      .update({
-        status: "success",
-        orders_fetched: fetched,
-        orders_updated: updated,
-        orders_deleted: deleted,
-        finished_at: new Date().toISOString(),
-      })
-      .eq("id", run.id);
+    await finishRun({ status: "success", orders_fetched: fetched, orders_updated: updated, orders_deleted: deleted });
     return result;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await db
-      .from("zoho_sync_runs")
-      .update({ status: "failed", error: message, finished_at: new Date().toISOString() })
-      .eq("id", run.id);
-    throw new Error(message);
+    await finishRun({ status: "failed", error: message });
+    // Rethrown as it is, so the webhook's log keeps the stack and the cause (Supabase / Zoho details).
+    throw error instanceof Error ? error : new Error(message, { cause: error });
   }
 }
 
@@ -196,7 +195,7 @@ export async function syncSalesOrderFromWebhook(salesorderId: string): Promise<S
       .select("id")
       .eq("zoho_salesorder_id", so.salesorder_id)
       .maybeSingle();
-    if (existingError) throw new Error(existingError.message);
+    if (existingError) throw new Error(existingError.message, { cause: existingError });
 
     await saveSalesOrder(db, so);
 
@@ -223,7 +222,7 @@ export async function deleteSalesOrderFromWebhook(salesOrderId: string): Promise
         .delete()
         .eq("zoho_salesorder_id", salesOrderId)
         .select("id, salesorder_number");
-      if (error) throw new Error(error.message);
+      if (error) throw new Error(error.message, { cause: error });
 
       return data.length ? { action: "deleted", salesorder_number: data[0].salesorder_number } : { action: "not_found" };
     },
@@ -396,7 +395,11 @@ async function saveQuote(db: AdminClient, est: ZohoEstimate, contactCache: Map<s
     if (contact === undefined) {
       try {
         contact = await getContact(est.customer_id);
-      } catch {
+      } catch (error) {
+        // Not fatal (the quote falls back to the estimate's own addresses), but worth a line in the logs.
+        console.warn(
+          `[zoho-sync] ${JSON.stringify({ event: "contact_lookup_failed", estimate: est.estimate_number, customerId: est.customer_id, error: describeError(error) })}`,
+        );
         contact = null;
       }
       contactCache.set(est.customer_id, contact);
@@ -412,14 +415,14 @@ async function saveQuote(db: AdminClient, est: ZohoEstimate, contactCache: Map<s
     .upsert(row, { onConflict: "zoho_estimate_id" })
     .select("id")
     .single();
-  if (quoteError) throw new Error(`${est.estimate_number}: ${quoteError.message}`);
+  if (quoteError) throw new Error(`${est.estimate_number}: ${quoteError.message}`, { cause: quoteError });
 
   const items = (est.line_items ?? []).map((li) => toQuoteItemRow(saved.id, li));
   if (items.length) {
     const { error: itemsError } = await db
       .from("quote_items")
       .upsert(items, { onConflict: "zoho_line_item_id" });
-    if (itemsError) throw new Error(`${est.estimate_number} items: ${itemsError.message}`);
+    if (itemsError) throw new Error(`${est.estimate_number} items: ${itemsError.message}`, { cause: itemsError });
   }
 
   // Remove line items that were deleted from the quote in Zoho.
@@ -428,7 +431,7 @@ async function saveQuote(db: AdminClient, est: ZohoEstimate, contactCache: Map<s
     staleItems = staleItems.not("zoho_line_item_id", "in", `(${items.map((i) => i.zoho_line_item_id).join(",")})`);
   }
   const { error: staleError } = await staleItems;
-  if (staleError) throw new Error(`${est.estimate_number} cleanup: ${staleError.message}`);
+  if (staleError) throw new Error(`${est.estimate_number} cleanup: ${staleError.message}`, { cause: staleError });
 }
 
 export type QuoteWebhookResult = { action: "created" | "updated"; estimate_number: string };
@@ -449,7 +452,7 @@ export async function syncQuoteFromWebhook(estimateId: string): Promise<QuoteWeb
       .select("id")
       .eq("zoho_estimate_id", est.estimate_id)
       .maybeSingle();
-    if (existingError) throw new Error(existingError.message);
+    if (existingError) throw new Error(existingError.message, { cause: existingError });
 
     await saveQuote(db, est, new Map());
 
@@ -474,7 +477,7 @@ export async function deleteQuoteFromWebhook(estimateId: string): Promise<QuoteD
         .delete()
         .eq("zoho_estimate_id", estimateId)
         .select("id, estimate_number");
-      if (error) throw new Error(error.message);
+      if (error) throw new Error(error.message, { cause: error });
 
       return data.length ? { action: "deleted", estimate_number: data[0].estimate_number } : { action: "not_found" };
     },
