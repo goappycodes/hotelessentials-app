@@ -22,12 +22,35 @@ function secretsMatch(given: string, expected: string) {
 
 // Reading the payload --------------------------------------------------------------------------------
 
-type ParsedBody = { format: "json" | "form" | "empty" | "unrecognised"; root: unknown; error?: string };
+type ParsedBody = { format: "json" | "multipart" | "form" | "empty" | "unrecognised"; root: unknown; error?: string };
 
 /**
- * Parses a webhook body. The format is detected from the content itself (a JSON object/array, or key=value
- * form fields) rather than trusted from the Content-Type header, and a byte-order mark or surrounding
- * whitespace is ignored — Zoho's body templates don't always match the header they are sent with.
+ * The text fields of a multipart/form-data body (what Zoho sends for a webhook's "Form Data" body). The boundary is
+ * read from the body's first line, so the Content-Type header isn't needed. File parts are skipped. Returns null
+ * when the text isn't multipart or has no fields.
+ */
+function parseMultipart(text: string): Record<string, string> | null {
+  const boundary = /^--([^\r\n]+)/.exec(text)?.[1];
+  if (!boundary) return null;
+
+  const fields: Record<string, string> = {};
+  for (const part of text.split(`--${boundary}`)) {
+    const headerEnd = /\r?\n\r?\n/.exec(part); // the headers end at the first blank line
+    if (!headerEnd) continue; // the text before the first boundary, or the closing "--"
+
+    const headers = part.slice(0, headerEnd.index);
+    const name = /content-disposition:[^\r\n]*?\bname="([^"]*)"/i.exec(headers)?.[1];
+    if (name === undefined || /\bfilename=/i.test(headers)) continue;
+
+    fields[name] = part.slice(headerEnd.index + headerEnd[0].length).replace(/\r?\n$/, "");
+  }
+  return Object.keys(fields).length ? fields : null;
+}
+
+/**
+ * Parses a webhook body. The format is detected from the content itself (a JSON object/array, multipart form
+ * data, or key=value form fields) rather than trusted from the Content-Type header, and a byte-order mark or
+ * surrounding whitespace is ignored — Zoho's body templates don't always match the header they are sent with.
  */
 function parseBody(rawBody: string): ParsedBody {
   const text = rawBody.replace(/^﻿/, "").trim();
@@ -40,6 +63,10 @@ function parseBody(rawBody: string): ParsedBody {
       return { format: "unrecognised", root: null, error: error instanceof Error ? error.message : String(error) };
     }
   }
+
+  const multipart = text.startsWith("--") ? parseMultipart(text) : null;
+  if (multipart) return { format: "multipart", root: multipart };
+
   if (text.includes("=")) return { format: "form", root: Object.fromEntries(new URLSearchParams(text)) };
   return { format: "unrecognised", root: null };
 }

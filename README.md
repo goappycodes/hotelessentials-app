@@ -70,8 +70,9 @@ All payloads also carry `organization_id`. The delete endpoints also accept the 
 - **Read-only towards Zoho:** the app never changes Zoho Books data. Its only requests to Zoho are `GET`s (plus the OAuth
   token refresh), and only for create/update; deletes make none.
 - Open an endpoint in a browser to check it is deployed: it returns `{"ok":true,"configured":true,…}`.
-- **Where the ids can be:** in the body (JSON or form fields, at any depth — the format is detected from the content, not the
-  `Content-Type` header, which Zoho does not always set to match) or as URL query parameters.
+- **Where the ids can be:** in the body (JSON, `multipart/form-data` fields — what Zoho sends for a webhook's *Form Data* body —
+  or url-encoded form fields, at any depth; the format is detected from the content, not the `Content-Type` header, which Zoho
+  does not always set to match) or as URL query parameters.
 
 **Debugging a failing webhook.** Every request writes one JSON line starting `[zoho-webhook]` (Vercel → Logs → search for
 that; set **Level = Error** to see only failures): `not_configured` (a `500`: the env vars missing), `unauthorized` (a `401`:
