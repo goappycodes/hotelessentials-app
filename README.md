@@ -74,10 +74,26 @@ All payloads also carry `organization_id`. The delete endpoints also accept the 
   `Content-Type` header, which Zoho does not always set to match) or as URL query parameters.
 
 **Debugging a failing webhook.** Every request writes one JSON line starting `[zoho-webhook]` (Vercel → Logs → search for
-that): `unauthorized` (secret header missing/different — lengths only, never the value), `rejected` (a 400: what was
-found, the payload's vs the expected `organization_id`, and a body preview), `ok`, `failed`. The 400 response body has the
-same `received` summary, so Zoho's Workflow Logs show it too. Set `ZOHO_WEBHOOK_DEBUG=1` to also log every accepted payload.
-If nothing is logged, the request never reached the app (check the URL and Vercel's deployment protection).
+that; set **Level = Error** to see only failures): `not_configured` (a `500`: the env vars missing), `unauthorized` (a `401`:
+secret header missing/different — lengths only, never the value), `rejected` (a `400`: what was found, the payload's vs the
+expected `organization_id`, and a body preview), `failed` (a `500` while saving — see below), `unexpected_error` (a crash
+anywhere else in the handler), `processing` and `ok`. Every line has the route, the record `id` and the Vercel `requestId`
+(the same id Vercel's log view shows for the request). A `processing` line with no `ok` / `failed` after it means the
+function was cut off (`maxDuration` is 60 s).
+
+A `failed` / `unexpected_error` line carries an `error` object: `name`, `message`, the top of the `stack`, any fields the error
+has (a Supabase error's `code`, `details`, `hint`; a Zoho error's `status`, `zohoCode`, `path`) and its `cause` chain (e.g. the
+network error behind "fetch failed"), plus `stage` (saving the record, or refreshing the page cache). The Zoho lookups also
+log a `[zoho-sync] contact_lookup_failed` warning when a customer's addresses couldn't be fetched (the quote is still saved).
+The 400 response body has the same `received` summary, so Zoho's Workflow Logs show it too. Set `ZOHO_WEBHOOK_DEBUG=1` to
+also log every accepted payload. If nothing is logged, the request never reached the app (check the URL and Vercel's
+deployment protection).
+
+Zoho's Workflow Logs show response **headers** even when they hide the body, so every response carries `X-Webhook-Build`
+(the commit and branch that answered — if this header is missing, an older deployment is still serving) and, once the secret
+has been verified, an error carries `X-Webhook-Error` (the reason plus what was received). The health check (`GET` on the
+endpoint) also reports `build`. Values in `ZOHO_WEBHOOK_SECRET` / `ZOHO_BOOKS_ORG_ID` are compared after trimming stray
+whitespace or surrounding quotes; changing an environment variable in Vercel needs a redeploy to take effect.
 
 **Set up** (once, then repeat steps 2–3 for each row of the table above)
 1. Set `ZOHO_WEBHOOK_SECRET` (Vercel → Environment Variables, and `.env.local` for local runs; mark it Sensitive) and make sure

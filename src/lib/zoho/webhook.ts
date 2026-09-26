@@ -2,6 +2,7 @@ import "server-only";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import type { NextRequest } from "next/server";
+import { describeError, webhookLog } from "./webhook-log";
 
 // Helpers for the Zoho Books webhooks (Settings → Automation → Workflow Actions → Webhooks).
 
@@ -123,10 +124,23 @@ function describePayload(rawBody: string, contentType: string, query: URLSearchP
 
 // Handling the request -------------------------------------------------------------------------------
 
-/** One JSON line per event, easy to search in the Vercel logs for "[zoho-webhook]". */
-function log(event: string, data: Record<string, unknown> = {}) {
-  console.log(`[zoho-webhook] ${JSON.stringify({ event, ...data })}`);
+/** An environment value as intended: without surrounding whitespace or a pair of quotes pasted along with it. */
+const cleanEnv = (value: string | undefined) => value?.trim().replace(/^(["'])(.*)\1$/, "$2").trim();
+
+/** Which deployment answered (Vercel's commit and branch), so a response shows whether the latest code is live. */
+function buildInfo() {
+  const commit = process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) ?? "local";
+  const branch = process.env.VERCEL_GIT_COMMIT_REF;
+  return branch ? `${commit} (${branch})` : commit;
 }
+
+/** Header values must be short printable ASCII. */
+const headerSafe = (text: string) => text.replace(/[^\x20-\x7E]/g, "?").slice(0, 300);
+
+type WebhookOptions = { idKey: string; run: (id: string) => Promise<object>; revalidate: string };
+
+/** The Vercel request id, to match a log line to the request in Vercel's dashboard. */
+const requestId = (request: NextRequest) => request.headers.get("x-vercel-id");
 
 /**
  * The request handling shared by every Zoho webhook route. Zoho is not signed in to the app, so the request
@@ -135,22 +149,48 @@ function log(event: string, data: Record<string, unknown> = {}) {
  * (`idKey`), runs `run` (save or delete the record) and replies with JSON. Zoho waits 10 s and retries
  * anything that isn't a 2xx, so failures are returned as 4xx/5xx rather than swallowed.
  *
- * Logging: every request writes a `[zoho-webhook]` line with its outcome. A rejected payload also logs a
+ * Diagnostics: every request writes `[zoho-webhook]` lines (see webhook-log.ts). Each failure — a refused secret, a
+ * rejected payload, an error while saving, or an unexpected crash — is logged with console.error, including the
+ * error's stack, its Supabase / Zoho details and its cause chain, plus the Vercel request id. A `processing` line
+ * with no `ok` / `failed` after it means the function was cut off (timeout). A rejected payload also logs a
  * preview of the body, and its 400 response says what was found; set ZOHO_WEBHOOK_DEBUG=1 to log every
- * authenticated payload. The secret itself is never logged.
+ * authenticated payload. Every response carries an `X-Webhook-Build` header (which commit answered) and, once the
+ * caller has authenticated, an error carries `X-Webhook-Error` — Zoho's Workflow Logs show response headers even
+ * when they don't show the body. The secret itself is never logged or returned.
  */
-export async function handleZohoWebhook(
-  request: NextRequest,
-  opts: { idKey: string; run: (id: string) => Promise<object>; revalidate: string },
-): Promise<Response> {
+export async function handleZohoWebhook(request: NextRequest, opts: WebhookOptions): Promise<Response> {
+  try {
+    return await processWebhook(request, opts);
+  } catch (error) {
+    // Anything the steps below didn't anticipate; the details stay in the logs, not in the reply.
+    webhookLog("error", "unexpected_error", {
+      route: request.nextUrl.pathname,
+      method: request.method,
+      idKey: opts.idKey,
+      requestId: requestId(request),
+      error: describeError(error),
+    });
+    return Response.json(
+      { ok: false, error: "Unexpected error while handling the webhook." },
+      { status: 500, headers: { "X-Webhook-Build": headerSafe(buildInfo()) } },
+    );
+  }
+}
+
+async function processWebhook(request: NextRequest, opts: WebhookOptions): Promise<Response> {
   const startedAt = Date.now();
-  const reply = (body: Record<string, unknown>, status = 200) => Response.json(body, { status });
+  const reply = (body: Record<string, unknown>, status = 200, errorHeader?: string) =>
+    Response.json(body, {
+      status,
+      headers: { "X-Webhook-Build": headerSafe(buildInfo()), ...(errorHeader ? { "X-Webhook-Error": headerSafe(errorHeader) } : {}) },
+    });
 
   const contentType = request.headers.get("content-type") ?? "";
   const query = request.nextUrl.searchParams;
   const meta = {
     route: request.nextUrl.pathname,
     method: request.method,
+    requestId: requestId(request),
     contentType,
     contentLength: request.headers.get("content-length"),
     userAgent: request.headers.get("user-agent"),
@@ -159,19 +199,22 @@ export async function handleZohoWebhook(
   };
 
   // Refuse everything until both values are configured, rather than running unauthenticated.
-  const secret = process.env.ZOHO_WEBHOOK_SECRET;
-  const organizationId = process.env.ZOHO_BOOKS_ORG_ID;
+  const secret = cleanEnv(process.env.ZOHO_WEBHOOK_SECRET);
+  const organizationId = cleanEnv(process.env.ZOHO_BOOKS_ORG_ID);
   if (!secret || !organizationId) {
-    console.error(
-      `[zoho-webhook] not configured: ${[!secret && "ZOHO_WEBHOOK_SECRET", !organizationId && "ZOHO_BOOKS_ORG_ID"].filter(Boolean).join(", ")} is not set; rejecting the request.`,
-    );
+    webhookLog("error", "not_configured", {
+      ...meta,
+      status: 500,
+      missing: [!secret && "ZOHO_WEBHOOK_SECRET", !organizationId && "ZOHO_BOOKS_ORG_ID"].filter(Boolean),
+    });
     return reply({ ok: false, error: "The webhook is not configured on the server." }, 500);
   }
 
   const given = request.headers.get(SECRET_HEADER);
   if (!given || !secretsMatch(given, secret)) {
-    log("unauthorized", {
+    webhookLog("error", "unauthorized", {
       ...meta,
+      status: 401,
       reason: given ? "the X-Zoho-Webhook-Secret value does not match ZOHO_WEBHOOK_SECRET" : "no X-Zoho-Webhook-Secret header",
       // Lengths only: a difference points at stray spaces/quotes, or at a different environment's secret.
       receivedLength: given?.length ?? null,
@@ -186,7 +229,7 @@ export async function handleZohoWebhook(
   // Only authenticated callers get here, so the reply can safely say what was received.
   const reject = (error: string) => {
     const received = describePayload(rawBody, contentType, query, idKeys);
-    log("rejected", {
+    webhookLog("error", "rejected", {
       ...meta,
       status: 400,
       error,
@@ -194,7 +237,21 @@ export async function handleZohoWebhook(
       expectedOrganizationId: organizationId,
       bodyPreview: rawBody.slice(0, BODY_PREVIEW_CHARS).split(secret).join("[redacted]"),
     });
-    return reply({ ok: false, error, received }, 400);
+
+    // The same facts in one header line, for tools (like Zoho's Workflow Logs) that only show headers.
+    const describeKey = (key: string) => {
+      const info = received.keys[key];
+      return info.found ? `${key}=${info.value}${info.validId ? "" : " (not a valid id)"}` : `${key}=missing`;
+    };
+    const summary = [
+      `format=${received.format}`,
+      `body keys=${received.topLevelKeys.join(",") || "none"}`,
+      ...idKeys.map(describeKey),
+      `server organization ends ${organizationId.slice(-4)} (${organizationId.length} chars)`,
+      `content-type=${contentType || "none"}`,
+      `body ${received.bodyLength} chars`,
+    ].join("; ");
+    return reply({ ok: false, error, received }, 400, `${error} ${summary}`);
   };
 
   const id = extractZohoId(rawBody, opts.idKey, query);
@@ -207,23 +264,29 @@ export async function handleZohoWebhook(
   }
 
   if (process.env.ZOHO_WEBHOOK_DEBUG) {
-    log("received", { ...meta, received: describePayload(rawBody, contentType, query, idKeys), bodyPreview: rawBody.slice(0, BODY_PREVIEW_CHARS).split(secret).join("[redacted]") });
+    webhookLog("info", "received", { ...meta, received: describePayload(rawBody, contentType, query, idKeys), bodyPreview: rawBody.slice(0, BODY_PREVIEW_CHARS).split(secret).join("[redacted]") });
   }
 
+  // Logged before the work starts: a `processing` line with no `ok` / `failed` after it means the function was cut off.
+  const where = { route: meta.route, method: meta.method, idKey: opts.idKey, id, requestId: meta.requestId };
+  webhookLog("info", "processing", where);
+
+  let stage = "saving the record";
   try {
     const result = await opts.run(id);
+    stage = "refreshing the page cache";
     revalidatePath(opts.revalidate, "layout");
-    log("ok", { route: meta.route, method: meta.method, idKey: opts.idKey, id, result, ms: Date.now() - startedAt });
+    webhookLog("info", "ok", { ...where, result, ms: Date.now() - startedAt });
     return reply({ ok: true, ...result });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.error(`[zoho-webhook] ${JSON.stringify({ event: "failed", route: meta.route, idKey: opts.idKey, id, error: message, ms: Date.now() - startedAt })}`);
-    return reply({ ok: false, error: message }, 500);
+    webhookLog("error", "failed", { ...where, status: 500, stage, error: describeError(error), ms: Date.now() - startedAt });
+    return reply({ ok: false, error: message }, 500, message);
   }
 }
 
-/** Response for GET: open the webhook URL in a browser to check it is deployed and the secret is set. */
+/** Response for GET: open the webhook URL in a browser to check it is deployed, configured, and which commit is live. */
 export function zohoWebhookHealth(name: string) {
-  const configured = Boolean(process.env.ZOHO_WEBHOOK_SECRET && process.env.ZOHO_BOOKS_ORG_ID);
-  return Response.json({ ok: true, webhook: name, method: "POST", configured });
+  const configured = Boolean(cleanEnv(process.env.ZOHO_WEBHOOK_SECRET) && cleanEnv(process.env.ZOHO_BOOKS_ORG_ID));
+  return Response.json({ ok: true, webhook: name, method: "POST", configured, build: buildInfo() });
 }

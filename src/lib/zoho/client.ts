@@ -8,6 +8,21 @@ import "server-only";
 const MIN_INTERVAL_MS = 650; // ≈ 92 requests / minute
 const MAX_RETRIES = 3;
 
+/** A failed Zoho request. The HTTP status, Zoho's own error code and the API path are kept for the webhook logs. */
+export class ZohoApiError extends Error {
+  status: number;
+  path: string;
+  zohoCode?: number | string;
+
+  constructor(message: string, details: { status: number; path: string; zohoCode?: number | string }) {
+    super(message);
+    this.name = "ZohoApiError";
+    this.status = details.status;
+    this.path = details.path;
+    this.zohoCode = details.zohoCode;
+  }
+}
+
 function env(name: string) {
   const value = process.env[name];
   if (!value) throw new Error(`Missing environment variable ${name}`);
@@ -36,7 +51,10 @@ async function getAccessToken(forceRefresh = false) {
   const data = await res.json();
 
   if (!res.ok || !data.access_token) {
-    throw new Error(`Zoho token refresh failed: ${data.error ?? res.statusText}`);
+    throw new ZohoApiError(`Zoho token refresh failed: ${data.error ?? res.statusText}`, {
+      status: res.status,
+      path: "/oauth/v2/token",
+    });
   }
 
   // Refresh a minute early to avoid using a token that expires mid-request.
@@ -86,9 +104,25 @@ async function zohoRequest(path: string, query: Record<string, string | number> 
 
 async function zohoJson<T>(path: string, query?: Record<string, string | number>): Promise<T> {
   const res = await zohoRequest(path, query);
-  const data = await res.json();
+  const body = await res.text();
+
+  let data;
+  try {
+    data = JSON.parse(body);
+  } catch {
+    // An error page from Zoho or a proxy rather than the API's JSON.
+    throw new ZohoApiError(`Zoho ${path} failed: HTTP ${res.status} ${res.statusText}, not JSON: ${body.slice(0, 200)}`, {
+      status: res.status,
+      path,
+    });
+  }
+
   if (!res.ok || data.code !== 0) {
-    throw new Error(`Zoho ${path} failed: ${data.message ?? res.statusText}`);
+    throw new ZohoApiError(`Zoho ${path} failed: ${data.message ?? res.statusText}`, {
+      status: res.status,
+      path,
+      zohoCode: data.code,
+    });
   }
   return data as T;
 }
